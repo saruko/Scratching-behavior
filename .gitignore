@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+outputs/
+test_swap.mp4
+.venv/
+.uv/
+.DS_Store

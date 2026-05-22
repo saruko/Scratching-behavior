@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>マウスひっかき行動自動検出システム | 分析ダッシュボード (拡張版)</title>
+    
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="SLEAP多個体ポーズトラッキングと尾部カラーIDに基づき、マウスの高速なひっかき動作をリアルタイムに自動検出・分析するインタラクティブなWebダッシュボード。">
+    <meta name="keywords" content="SLEAP, SimBA, マウス, ひっかき行動, ポーズ推定, 行動解析, バイオインフォマティクス, 薬理ゲノミクス">
+    
+    <!-- Google Fonts Preload (L-4) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap">
+
+    <!-- Unified Styling -->
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+
+    <div class="dashboard-container">
+        
+        <!-- ========================================== -->
+        <!-- HEADER PANEL                               -->
+        <!-- ========================================== -->
+        <header class="dashboard-header">
+            <div class="brand-section">
+                <div class="brand-icon">
+                    <i data-lucide="activity" style="color: #FFFFFF; width: 20px; height: 20px;"></i>
+                </div>
+                <div>
+                    <h1 class="brand-title">Mouse Scratch Detection System</h1>
+                    <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 1px;">SLEAP Pose & Tail-Color ID Kinematic Analyzer (Manual Correction Mode)</p>
+                </div>
+            </div>
+            
+            <div class="header-status">
+                <!-- Clickable Workspace indicator -->
+                <div style="font-size: 0.78rem; color: var(--text-secondary); text-align: right; margin-right: 15px;">
+                    <div style="font-weight: 600; color: var(--text-primary);">アクティブな作業フォルダ:</div>
+                    <code style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.75rem;">mouse-scratch-dashboard/</code>
+                </div>
+                <div class="status-badge" id="file-badge">
+                    <div class="status-dot"></div>
+                    <span id="loaded-file-name">デモデータロード中</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- ========================================== -->
+        <!-- MAIN WORKSPACE GRID                        -->
+        <!-- ========================================== -->
+        <main class="workspace-grid">
+            
+            <!-- --- 1. LEFT COLUMN: DATA PIPELINE & SELECTORS --- -->
+            <section class="left-column">
+                
+                <!-- CSV & Video Import Card -->
+                <div class="panel-card" style="flex: 0 0 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="folder-open" style="width: 16px; height: 16px;"></i>データインポート & 映像同期</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+                        
+                        <!-- CSV Loader -->
+                        <div class="upload-box" id="csv-drop-zone" style="padding: 15px 10px;">
+                            <i data-lucide="upload-cloud" class="upload-icon" style="font-size: 1.5rem; margin-bottom: 5px;"></i>
+                            <div class="upload-text" style="font-size: 0.8rem;">トラッキング CSV をドロップ</div>
+                            <input type="file" id="csv-file-input" class="hidden" accept=".csv" multiple>
+                        </div>
+                        
+                        <!-- Video Loader -->
+                        <div class="upload-box" id="video-drop-zone" style="padding: 15px 10px; border-color: rgba(255, 255, 255, 0.08);">
+                            <i data-lucide="film" class="upload-icon" style="color:#A855F7; font-size: 1.5rem; margin-bottom: 5px;"></i>
+                            <div class="upload-text" style="font-size: 0.8rem;">実験動画 (.mp4) を選択 / ドロップ</div>
+                            <div class="upload-sub" id="video-status-text" style="font-size: 0.7rem; color:var(--text-muted);">動画未ロード (背景は黒)</div>
+                            <input type="file" id="video-file-input" class="hidden" accept="video/mp4,video/*">
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Individual Target Selector -->
+                <div class="panel-card" style="flex: 0 0 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="users" style="width: 16px; height: 16px;"></i>個体選択</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 10px;">
+                        <div class="mouse-selector-list">
+                            <button class="mouse-btn active" id="mouse-btn-1" data-mouse-id="1" style="--active-border-color: var(--color-mouse-1); --active-glow-color: rgba(239, 68, 68, 0.3);">
+                                <div class="mouse-info">
+                                    <span class="mouse-color-dot" style="color: var(--color-mouse-1); background-color: currentColor;"></span>
+                                    <span class="mouse-label">Mouse 1 (赤)</span>
+                                </div>
+                                <span class="mouse-scratch-badge">ひっかき中</span>
+                            </button>
+                            
+                            <button class="mouse-btn" id="mouse-btn-2" data-mouse-id="2" style="--active-border-color: var(--color-mouse-2); --active-glow-color: rgba(59, 130, 246, 0.3);">
+                                <div class="mouse-info">
+                                    <span class="mouse-color-dot" style="color: var(--color-mouse-2); background-color: currentColor;"></span>
+                                    <span class="mouse-label">Mouse 2 (青)</span>
+                                </div>
+                                <span class="mouse-scratch-badge">ひっかき中</span>
+                            </button>
+                            
+                            <button class="mouse-btn" id="mouse-btn-3" data-mouse-id="3" style="--active-border-color: var(--color-mouse-3); --active-glow-color: rgba(234, 179, 8, 0.3);">
+                                <div class="mouse-info">
+                                    <span class="mouse-color-dot" style="color: var(--color-mouse-3); background-color: currentColor;"></span>
+                                    <span class="mouse-label">Mouse 3 (黄)</span>
+                                </div>
+                                <span class="mouse-scratch-badge">ひっかき中</span>
+                            </button>
+                            
+                            <button class="mouse-btn" id="mouse-btn-4" data-mouse-id="4" style="--active-border-color: var(--color-mouse-4); --active-glow-color: rgba(156, 163, 175, 0.3);">
+                                <div class="mouse-info">
+                                    <span class="mouse-color-dot" style="color: var(--color-mouse-4); background-color: currentColor;"></span>
+                                    <span class="mouse-label">Mouse 4 (黒)</span>
+                                </div>
+                                <span class="mouse-scratch-badge">ひっかき中</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Manual Correction & ID Swapper Card -->
+                <div class="panel-card" style="flex: 1 1 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="edit-3" style="width: 16px; height: 16px;"></i>手動補正ツール</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 12px; display: flex; flex-direction: column; gap: 12px;">
+                        
+                        <!-- ID Swap section -->
+                        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px;">
+                            <div style="font-size: 0.8rem; font-weight: 600; color: var(--accent); margin-bottom: 8px; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="shuffle" style="width:14px; height:14px;"></i>個体IDの入れ替え (取り違え修正)
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">
+                                <select id="swap-mouse-a" class="speed-select" style="width:100%;" aria-label="個体A">
+                                    <option value="1">Mouse 1 (赤)</option>
+                                    <option value="2">Mouse 2 (青)</option>
+                                    <option value="3">Mouse 3 (黄)</option>
+                                    <option value="4">Mouse 4 (黒)</option>
+                                </select>
+                                <select id="swap-mouse-b" class="speed-select" style="width:100%;" aria-label="個体B">
+                                    <option value="1">Mouse 1 (赤)</option>
+                                    <option value="2">Mouse 2 (青)</option>
+                                    <option value="3" selected>Mouse 3 (黄)</option>
+                                    <option value="4">Mouse 4 (黒)</option>
+                                </select>
+                            </div>
+                            <div style="display: flex; flex-direction: column; gap: 6px;">
+                                <label style="font-size: 0.7rem; color: var(--text-secondary); display:flex; align-items:center; gap:5px;">
+                                    <span>入れ替え適用開始フレーム:</span>
+                                    <input type="number" id="swap-start-frame" value="0" min="0" style="background: rgba(0,0,0,0.3); border:1px solid var(--border-color); color:#fff; width: 60px; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center;">
+                                </label>
+                                <button id="btn-swap-ids" class="mouse-btn" style="padding: 8px; background: rgba(0, 242, 254, 0.1); border-color: var(--accent); text-align: center; justify-content: center; font-size: 0.78rem; font-weight:600;">
+                                    IDスワップを実行
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Manual keypoint dragging guide -->
+                        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; font-size: 0.75rem; color: var(--text-secondary); line-height: 1.45;">
+                            <div style="font-weight: 600; color: #FFFFFF; margin-bottom: 5px; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="mouse-pointer-click" style="width:14px; height:14px; color:#10B981;"></i>ノード位置の手動調整
+                            </div>
+                            再生を **一時停止** させた状態で、キャンバス上の関節ノード（眼、前足、後足など）をクリックし、任意の場所へ **ドラッグ＆ドロップ** すると座標が即座に手動修正されます。
+                        </div>
+
+                        <!-- Export corrected CSV -->
+                        <button id="btn-export-csv" class="mouse-btn" style="padding: 10px; background: linear-gradient(135deg, #10B981 0%, #059669 100%); border:none; text-align: center; justify-content: center; font-weight:600; color:#fff; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2); margin-top: auto;">
+                            <i data-lucide="download" style="width:16px; height:16px; margin-right:5px;"></i>補正後 CSV の出力 (Export)
+                        </button>
+
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- --- 2. CENTER COLUMN: CAGE VISUALIZER & PLAYBACK TIMELINE --- -->
+            <section class="center-column">
+                
+                <!-- Main Canvas visualizer -->
+                <div class="panel-card" id="visualizer-panel" style="position: relative;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="eye" style="width: 16px; height: 16px;"></i>ケージ姿勢可視化 (実映像オーバーレイ対応)</h2>
+                        <div class="playback-options">
+                            <select id="speed-select" class="speed-select" aria-label="再生速度">
+                                <option value="0.25">0.25x</option>
+                                <option value="0.5">0.5x</option>
+                                <option value="1.0" selected>1.0x (標準)</option>
+                                <option value="1.5">1.5x</option>
+                                <option value="2.0">2.0x</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Overlay layer: Canvas on top, video on bottom -->
+                    <div class="visualizer-container" style="background: #000;">
+                        <!-- Background video player, hidden by default until loaded -->
+                        <video id="bg-video" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1;" muted playsinline></video>
+                        
+                        <!-- Overlay Canvas -->
+                        <canvas id="cage-canvas" width="800" height="550" style="position: relative; z-index: 2; cursor: default; background-color: transparent;"></canvas>
+                        
+                        <!-- Overlay playback buttons -->
+                        <div class="playback-controls" style="z-index: 3;">
+                            <button class="control-btn" id="btn-prev" title="前フレームへ"><i data-lucide="skip-back" style="width: 18px; height: 18px;"></i></button>
+                            <button class="control-btn btn-play" id="btn-play" title="再生 / 一時停止"><i data-lucide="play" style="width: 22px; height: 22px; fill: currentColor;"></i></button>
+                            <button class="control-btn" id="btn-next" title="次フレームへ"><i data-lucide="skip-forward" style="width: 18px; height: 18px;"></i></button>
+                            <div class="time-display">
+                                <span id="time-current">00:00.00</span>
+                                <span id="time-total" style="color: var(--text-muted);">/ 00:20.00</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Timeline and multi-channel scratch plots -->
+                <div class="panel-card timeline-card">
+                    <div class="panel-header" style="padding: 12px 20px;">
+                        <h2 class="panel-title"><i data-lucide="sliders" style="width: 16px; height: 16px;"></i>再生タイムライン & ひっかき検出チャネル</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 12px 20px;">
+                        <div class="scrub-container">
+                            <input type="range" id="scrub-slider" min="0" max="599" value="0" aria-label="タイムラインシークバー">
+                        </div>
+                        
+                        <!-- Track markers -->
+                        <div class="timeline-channels">
+                            <div class="channel-row">
+                                <span class="channel-label">Mouse 1</span>
+                                <div class="channel-track" id="track-mouse-1"></div>
+                            </div>
+                            <div class="channel-row">
+                                <span class="channel-label">Mouse 2</span>
+                                <div class="channel-track" id="track-mouse-2"></div>
+                            </div>
+                            <div class="channel-row">
+                                <span class="channel-label">Mouse 3</span>
+                                <div class="channel-track" id="track-mouse-3"></div>
+                            </div>
+                            <div class="channel-row">
+                                <span class="channel-label">Mouse 4</span>
+                                <div class="channel-track" id="track-mouse-4"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- --- 3. RIGHT COLUMN: FEATURE INSPECTOR & TELEMETRY --- -->
+            <section class="right-column">
+                
+                <!-- Kinematic Feature values -->
+                <div class="panel-card" style="flex: 0 0 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="activity" style="width: 16px; height: 16px;"></i>キネマティクス特徴量 (リアルタイム)</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 15px;">
+                        <div class="inspector-grid">
+                            
+                            <!-- Left Paw Speed -->
+                            <div class="inspector-card">
+                                <div class="inspector-val" id="val-speed-l">0 px/f</div>
+                                <div class="inspector-lbl">左後肢 速度</div>
+                                <div class="threshold-indicator" id="stat-speed-l">
+                                    <span>閾値: &gt;30px</span>
+                                    <span>-</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Right Paw Speed -->
+                            <div class="inspector-card">
+                                <div class="inspector-val" id="val-speed-r">0 px/f</div>
+                                <div class="inspector-lbl">右後肢 速度</div>
+                                <div class="threshold-indicator" id="stat-speed-r">
+                                    <span>閾値: &gt;30px</span>
+                                    <span>-</span>
+                                </div>
+                            </div>
+
+                            <!-- Left Ear Dist -->
+                            <div class="inspector-card">
+                                <div class="inspector-val" id="val-dist-l">150 px</div>
+                                <div class="inspector-lbl">左後肢 ↔ 左耳 距離</div>
+                                <div class="threshold-indicator" id="stat-dist-l">
+                                    <span>閾値: &lt;150px</span>
+                                    <span>-</span>
+                                </div>
+                            </div>
+
+                            <!-- Right Ear Dist -->
+                            <div class="inspector-card">
+                                <div class="inspector-val" id="val-dist-r">150 px</div>
+                                <div class="inspector-lbl">右後肢 ↔ 右耳 距離</div>
+                                <div class="threshold-indicator" id="stat-dist-r">
+                                    <span>閾値: &lt;150px</span>
+                                    <span>-</span>
+                                </div>
+                            </div>
+
+                            <!-- Left Reversals -->
+                            <div class="inspector-card">
+                                <div class="inspector-val" id="val-osc-l">0 rev</div>
+                                <div class="inspector-lbl">左後肢 振動 (反転数)</div>
+                            </div>
+
+                            <!-- Right Reversals -->
+                            <div class="inspector-card">
+                                <div class="inspector-val" id="val-osc-r">0 rev</div>
+                                <div class="inspector-lbl">右後肢 振動 (反転数)</div>
+                            </div>
+                            
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Line Chart: live signals rolling window -->
+                <div class="panel-card" style="flex: 1 1 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="trending-up" style="width: 16px; height: 16px;"></i>後肢キネマティクス信号 (30f 窓)</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 10px; position: relative;">
+                        <canvas id="chart-live-signal" style="width: 100%; height: 100%;"></canvas>
+                    </div>
+                </div>
+
+                <!-- Bouts Feed Panel -->
+                <div class="panel-card" style="flex: 1 1 auto; max-height: 200px;">
+                    <div class="panel-header">
+                        <h2 class="panel-title"><i data-lucide="list-video" style="width: 16px; height: 16px;"></i>ひっかき検出エピソード (Bouts)</h2>
+                    </div>
+                    <div class="panel-body" style="padding: 12px; overflow-y: auto;" id="bouts-list-container">
+                        <!-- Filled by app.js -->
+                    </div>
+                </div>
+
+            </section>
+
+        </main>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- ANALYTICS TAB BOX (MODAL VIEW AT BOTTOM)   -->
+    <!-- ========================================== -->
+    <div style="padding: 0 20px 20px 20px; margin-top: 20px;">
+        <div class="panel-card chart-panel-container">
+            <div class="panel-header">
+                <h2 class="panel-title"><i data-lucide="bar-chart-3" style="width: 18px; height: 18px;"></i>ひっかき行動 統合統計レポート</h2>
+            </div>
+            <div class="panel-body" style="display: grid; grid-template-columns: 1fr 1fr; gap: 40px; height: 260px; padding: 20px;">
+                <div style="position: relative; height: 100%;">
+                    <h3 style="font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600; text-align: center;">個体別ひっかき発生回数の比較</h3>
+                    <div style="height: 190px;">
+                        <canvas id="chart-bout-counts"></canvas>
+                    </div>
+                </div>
+                <div style="position: relative; height: 100%;">
+                    <h3 style="font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 10px; font-weight: 600; text-align: center;">個体別ひっかき累積秒数</h3>
+                    <div style="height: 190px;">
+                        <canvas id="chart-bout-durations"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- SCRIPTS LOADING                            -->
+    <!-- ========================================== -->
+    
+    <!-- Third Party CDNs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+    <script src="https://unpkg.com/lucide@0.300.0"></script>
+    
+    <!-- Application Logic Modules -->
+    <script src="constants.js"></script>
+    <script src="demoData.js"></script>
+    <script src="visualizer.js"></script>
+    <script src="charts.js"></script>
+    <script src="app.js"></script>
+
+</body>
+</html>
