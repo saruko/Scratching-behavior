@@ -98,48 +98,12 @@ def load_sleap_h5(sleap_path: str) -> pd.DataFrame:
 
     try:
         print(f"[pipeline] [Info] SLEAP H5データをロード中: {sleap_path}")
-        with h5py.File(sleap_path, "r") as f:
-            if "node_names" not in f or "tracks" not in f:
-                raise ValueError("SLEAP H5ファイルのスキーマが期待と異なります（node_names または tracks がありません）。")
-
-            node_names = [n.decode("utf-8") for n in f["node_names"][:]]
-            tracks = f["tracks"][:] # 形状: (n_frames, n_nodes, 2, n_tracks)
-            
-            if len(tracks.shape) != 4:
-                raise ValueError(f"想定外のトラックデータ形状です: {tracks.shape}")
-                
-            n_frames, n_nodes, n_coords, n_tracks = tracks.shape
-            print(f"[pipeline] ロード完了: フレーム数={n_frames}, ノード数={n_nodes}, トラック数={n_tracks}")
-
-            records = []
-            for t_idx in range(n_tracks):
-                track_name = f"track_{t_idx}"
-                for f_idx in range(n_frames):
-                    frame_track_coords = tracks[f_idx, :, :, t_idx] # (n_nodes, 2)
-                    if np.isnan(frame_track_coords).all():
-                        continue
-                        
-                    row = {
-                        "frame_idx": f_idx,
-                        "track": track_name,
-                        "is_mock": 0
-                    }
-                    
-                    # 各ノードの座標を展開
-                    for n_idx, node in enumerate(node_names):
-                        if node in KEYPOINTS:
-                            x = frame_track_coords[n_idx, 0]
-                            y = frame_track_coords[n_idx, 1]
-                            row[f"{node}_x"] = float(x) if not np.isnan(x) else np.nan
-                            row[f"{node}_y"] = float(y) if not np.isnan(y) else np.nan
-                            row[f"{node}_conf"] = 1.0 if not (np.isnan(x) or np.isnan(y)) else 0.0
-                            
-                    records.append(row)
-                    
-            df = pd.DataFrame(records)
-            if df.empty:
-                raise ValueError("H5ファイルから有効な座標レコードを抽出できませんでした。")
-            return df
+        # 次元正規化（SLEAP は転置が必要）と point_scores の読み込みは
+        # pose_engine.parse_sleap_analysis_h5 に一元化し、両経路で同一処理を保証する。
+        long_df = pose_engine.parse_sleap_analysis_h5(sleap_path)
+        if long_df.empty:
+            raise ValueError("H5ファイルから有効な座標レコードを抽出できませんでした。")
+        return long_to_wide_format(long_df)
 
     except Exception as e:
         print(f"[pipeline] [Error] H5読み込み中にエラーが発生しました: {e}")
@@ -205,10 +169,17 @@ def main():
 
     # 出力先ディレクトリの作成
     os.makedirs(args.out_dir, exist_ok=True)
-    
+
     print("\n========================================================")
     print(" Mouse Scratch Detection Pipeline")
     print("========================================================\n")
+
+    # ⚠️ デフォルトの pixel→mm キャリブレーション値を使用している場合、学術論文用途では校正必須を警告
+    if abs(args.px_to_mm - 0.25) < 1e-9:
+        print("[pipeline] [Warning] ⚠️ pixel-to-mm 比率がデフォルト値 0.25 mm/px で実行されています。")
+        print("[pipeline]            学術論文用途では、各カメラ設置位置で物差し撮影による実測校正を行い")
+        print("[pipeline]            --px-to-mm <実測値> オプションで指定してください。未校正の場合、")
+        print("[pipeline]            mm/s 速度・mm 距離の絶対値は無意味となり、実験間比較に使用できません。")
 
     # 動画から実際の FPS を読み取る (cv2 が使えない場合は DEFAULT_FPS にフォールバック)
     fps = float(args.fps) if args.fps is not None else None

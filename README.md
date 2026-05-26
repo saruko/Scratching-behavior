@@ -1,214 +1,420 @@
-# 🐭 マウスひっかき行動自動検出システム (GUI ＆ 多モデル比較・補正プラットフォーム)
+# 🐭 Mouse Scratch Detection System
 
-本システムは、集団飼育環境におけるマウスの自動ひっかき行動（Scratch Bout）検出において、トラッキングデータの可視化、個体識別アライメント、骨格姿勢データの手動補正、および異なる姿勢推定モデルの比較検討をシームレスに行うための統合プラットフォームです。
+集団飼育環境下のマウスのひっかき行動（scratch bout）を、姿勢推定 + 物理単位（mm/s, mm）ルールベース判定で自動検出する **学術品質パイプライン** と **インタラクティブ補正ダッシュボード** の統合プラットフォームです。
 
-追加パッケージの環境構築なしでローカルでもGoogle Colabでも美しく動作する**プレミアムWebダッシュボード（GUI）**と、マルチアニマルトラッキングにおける最大の課題である「IDの取り違え（混同）」を自動的に防止・分割する**Pythonバックエンドロジック**によって構成されています。
+* **再現可能性**：判定閾値はすべて物理単位（mm/s・mm）、観察時間で正規化された統計量を出力。
+* **個体識別**：尾部カラーマーク（赤・青・黄・黒）を HSV 空間で検出し、混同（identity swap）を自動分割。
+* **手動補正**：ドラッグ＆ドロップで関節点を補正、IDスワップ、一括オフセット、即時再計算。
+* **精度評価**：手動 GT との照合で frame-level（P / R / F1 / Cohen's κ）および bout-level（sensitivity / FDR / temporal IoU）を算出。
+* **GUI ↔ バックエンド完全一致**：手動補正後の GUI 再計算と、パイプライン出力の判定ロジックが同一閾値・同一式で完全一致。
 
-学術研究における高い信頼性と再現性を確保するため、座標補間や物理単位への換算、NaN（欠損値）の厳密な伝搬など、サイエンティフィック・マルチモーダル・データマネジメントに準拠した実装が施されています。
+> ⚠️ **学術論文として使用する前に必ず読んでください**：本システムのスクラッチ検出は **ルールベースのヒューリスティック** であり、精度は対象動画・カメラ設置条件・個体ごとに変動します。論文化前には必ず **手動アノテーション（グラウンドトゥルース）を `evaluate.py` で照合し、precision / recall / F1 / κ を報告** してください。詳細は [§ 学術利用上の必須事項](#-学術利用上の必須事項) を参照。
 
 ---
 
-## 📸 システムの概要と想定される動き（ワークフロー）
+## 📑 目次
+1. [システム概要](#-システム概要)
+2. [ワークフロー](#-ワークフロー)
+3. [スクラッチ判定アルゴリズム（学術品質）](#-スクラッチ判定アルゴリズム学術品質)
+4. [プロジェクト構成](#-プロジェクト構成)
+5. [セットアップと起動手順](#-セットアップと起動手順)
+6. [使用方法（パイプライン CLI / GUI）](#-使用方法パイプライン-cli--gui)
+7. [出力 CSV スキーマ](#-出力-csv-スキーマ)
+8. [グラウンドトゥルース評価](#-グラウンドトゥルース評価)
+9. [API リファレンス](#-api-リファレンス)
+10. [学術利用上の必須事項](#-学術利用上の必須事項)
+11. [既知の制約と既知のバグ](#-既知の制約と既知のバグ)
+12. [テスト](#-テスト)
 
-本システムは、実験ビデオの録画から、複数モデルによる比較検討、データ補正、最終解析（SimBA等へのインポート）までの一連の流れ（ワークフロー）を完全にカバーするように設計されています。
+---
+
+## 🎯 システム概要
+
+| コンポーネント | 役割 |
+| --- | --- |
+| **`pipeline.py`** | 動画 → 姿勢推定 → カラー ID 同定 → 特徴量抽出 → スクラッチ判定 → CSV 出力 |
+| **`pose_engine.py`** | SLEAP / YOLOv8-pose / MockPoseEngine の抽象化、GPU 自動検出 |
+| **`color_id.py`** | 尾色（HSV）スライディング窓投票による個体 ID 割当 + Identity Swap 自動分割 |
+| **`feature_extraction.py`** | 信頼度マスキング、線形補間、mm 換算、速度平滑化、振動カウント、scratch_prob 連続スコア |
+| **`evaluate.py`** | フレーム / Bout レベルの精度評価（手動 GT との照合） |
+| **`app_server.py`** | FastAPI バックエンド（静的配信 + 非同期解析 + 評価 API） |
+| **`index.html` / `app.js` / `visualizer.js` / `charts.js`** | プレミアム GUI ダッシュボード（再生・補正・即時再計算・可視化） |
+
+### 主要機能
+
+- **同期デュアル動画パネル**：元動画（左）と骨格オーバーレイ動画（右）をフレーム単位で完全同期再生。
+- **ドラッグ＆ドロップ補正**：Canvas 上で関節点をドラッグするとローカル ±15 フレームで mm 単位の判定が即時に再計算される。
+- **個体 ID 手動スワップ**：パイプラインで補正しきれなかった混同をフレーム指定で一括入れ替え。
+- **バルクオフセット**：複数フレームに渡るカメラズレを X/Y 移動量で一括補正（現在フレーム / 以降 / 全フレーム）。
+- **比較解析ローダー**：`outputs/` 配下の複数モデル結果 CSV を 1 クリックで切り替え可視化。
+- **補正後 CSV エクスポート**：手動補正済みデータを `evaluate.py` に直接流せるスキーマで出力。
+
+---
+
+## 🔄 ワークフロー
 
 ```mermaid
 graph TD
-    A["実験ビデオ録画 (.mp4/.mov)"] --> B["多モデル比較 & 骨格解析<br>(Google Colab / ローカル)"]
-    B -->|手法1: Zenodo 大規模モデル| C["骨格解析 & 特徴量抽出 pipeline.py"]
-    B -->|手法2: SLEAP チュートリアル| C
-    B -->|手法3 & 4: YOLOv8 追加学習| C
-    C -->|スライディング窓によるカラーID判定| D{"Identity Swap (混同) の検知"}
-    D -->|あり| E["トラックを自動分割<br>(track_0 -> track_0_split_1)"]
-    D -->|なし| F["安定した mouse_id の割り当て"]
-    E --> F
-    F --> G["モデル別結果CSV & 動画の出力"]
-    G --> H["プレミアム同期Webダッシュボード"]
-    H -->|骨格ズレ・感度比較| I["モデル精度の視覚的比較検討"]
-    H -->|ドラッグ&ドロップ & 一括オフセット| J["座標の手動修正 ＆ キネマティクス即時再計算"]
-    H -->|ID Swap機能| K["残存した混同の手動ID入れ替え"]
-    J --> L["完璧に補正されたCSVエクスポート"]
-    K --> L
-    L --> M["SimBA等の行動分類器での解析・再学習"]
+    A["実験動画 .mp4/.mov"] --> B["姿勢推定<br>(SLEAP / YOLOv8 / Mock)"]
+    B --> C["尾色 HSV → mouse_id<br>+ Identity Swap 自動分割"]
+    C --> D["信頼度マスク + 線形補間"]
+    D --> E["mm 換算 + 速度平滑化<br>+ 振動カウント"]
+    E --> F["scratch_prob 連続スコア<br>+ scratch_flag"]
+    F --> G["Bout 検出<br>(min=5f, merge_gap=10f)"]
+    G --> H["frame_labels.csv<br>bouts.csv<br>summary.csv"]
+    H --> I["GUI: 手動補正<br>(ドラッグ・スワップ・オフセット)"]
+    I --> J["corrected.csv エクスポート"]
+    H --> K["evaluate.py で<br>手動 GT と照合"]
+    K --> L["P/R/F1/κ + IoU<br>論文用精度レポート"]
 ```
-
-### 1. 🔬 4種類の手法による姿勢推定モデルの比較検討（アノテーション完全不要）
-本システムでは、自分で1枚もアノテーション（手動ラベル貼り）をすることなく、異なるアプローチのモデルによる解析精度を直接比較検討できます。
-1. **【手法1】Zenodo (SuperAnimal-TopViewMouse-5K)**:
-   5,000枚のトップダウンマウス画像を用いた学術用大規模データセットをベースにした、極めて頑健なSLEAPモデル。
-2. **【手法2】SLEAP公式チュートリアルデータセット (centered_pair)**:
-   SLEAP公式が提供する標準的なトップダウン2匹マウス追跡用データセット/モデルテンプレート。
-3. **【手法3】Roboflow (sl-h33qa/mouse_poseestimate) モデル**:
-   Roboflow Universeで公開されているマウス骨格推定アノテーションデータセットを用いたYOLOv8ポーズモデル。
-4. **【手法4】Google Colab上でのYOLOv8-pose超高速ファインチューニング（追加学習）**:
-   標準の人間用 `yolov8n-pose.pt` に対し、上記Roboflowの公開アノテーションデータを用いてColabの無料T4 GPUで高速に追加学習を施したカスタムモデル。
-
-### 2. 🛡️ Pythonバックエンド（カラーIDアライメント ＆ 自動分割）
-*   **カラーペイント識別**: 各マウスの尾部に塗布された一意のペイント（赤・青・黄・黒）を、OpenCVを用いてフレームごとにHSV色空間で検出します。
-*   **混同（Identity Swap）の自動分割**: 2匹のマウスが交差した際にSLEAPのIDが入れ替わってしまった場合、30フレームのスライディング窓が色の遷移を検知し、瞬時にトラックを分割します。
-
-### 3. 🖥️ プレミアム同期Webダッシュボードでの可視化 ＆ 補正
-*   **同期デュアルビデオパネル**: 「読み込んだ無加工の元動画（左）」と「骨格マーカー＆尾部ペイントを被せた解析動画（右）」の2面がミリ秒単位で完全に同期してオーバーレイ再生されます。
-*   **比較解析結果の動的自動ロード（ドラッグ＆ドロップ不要）**: 
-    サーバー内の `outputs/` 配下を自動検出するAPI（`/api/results`）を新設。画面左上の「比較解析結果の自動ロード」ドロップダウンから選択するだけで、異なるアプローチで生成された複数のモデル別CSV結果を瞬時にロードして骨格スケルトンや行動グラフをシームレスに切り替え表示できます。
-*   **アノテーションマーカーの手動補正**: Canvas上の関節点をドラッグ＆ドロップしてその場で直感的に修正できます。
-*   **バルクオフセット（一括座標補正）**: 複数フレームにまたがるアライメントのズレに対し、X/Y軸の移動量（dx, dy）を指定して「現在フレームのみ」「前方すべてのフレーム」「全フレーム」に一括でオフセットを適用できる強力な補正UIを搭載しています。
-*   **手動IDスワッパー (Swap)**: 自動アライメントをすり抜けた微小な個体入れ替わりも、GUI上のIDスワッパーを使って数クリックで一瞬で修正できます。
 
 ---
 
-## 📂 プロジェクトのフォルダ構成と各ファイルの役割
+## 🧬 スクラッチ判定アルゴリズム（学術品質）
 
-本プロジェクトは、フロントエンド（HTML/CSS/JSによる静的SPA）とバックエンド（FastAPIによる解析サーバーおよびPythonデータ処理群）が美しく疎結合に設計されています。
+すべての判定は **物理単位（mm/s・mm）** で行い、カメラ間・実験間の比較を可能にします。
+
+### 1. 信頼度マスキング（補間前）
+
+| キーポイント | 閾値 | 環境変数 |
+| --- | --- | --- |
+| 後肢（`left_hind_paw`, `right_hind_paw`） | `0.35` | `HIND_PAW_MIN_CONF` |
+| その他全キーポイント | `0.40` | `MIN_CONFIDENCE` |
+
+閾値未満の座標は **補間前に NaN へマスク**。盲目的ゼロ埋めによる速度スパイクを防止。
+
+### 2. 線形補間
+
+- **最大ギャップ**: `INTERPOLATION_MAX_GAP = 5` フレーム（≈ 167 ms @ 30 fps）
+- これを超える深刻な欠損は **NaN を厳密伝搬**（速度・距離も NaN になる）。
+
+### 3. フレーム間速度（mm/s）
+
+```
+speed_px_per_frame = sqrt((x_t - x_{t-prev})² + (y_t - y_{t-prev})²) / Δf
+speed_mm_s        = speed_px_per_frame × pixel_to_mm_ratio × fps
+```
+
+- **欠損フレーム差 (`Δf`) で正規化**：補間限界を超えた区間では速度を NaN とする。
+- **移動平均平滑化**：`SCRATCH_VELOCITY_SMOOTH_FRAMES = 5` フレームのローリング平均を判定に使用。
+
+### 4. 振動カウント（最小振幅フィルタ付き）
+
+`SCRATCH_WINDOW_FRAMES = 15` フレームのローリング窓内で **x 軸・y 軸両方** の方向転換回数を数え、`max(osc_x, osc_y)` を採用。
+
+- 振幅 `|d| < SCRATCH_MIN_OSC_AMPLITUDE_PX = 3.0 px` の変位は **姿勢推定ジッタとして無視**。
+- 振幅閾値未達時は `last_d` を更新しないため、ノイズによる誤カウントを抑制。
+
+### 5. スクラッチ判定（連続スコア [0, 1]）
+
+| 条件 | 閾値 | 環境変数 |
+| --- | --- | --- |
+| 平滑化速度 | `> 150 mm/s` | `SCRATCH_MIN_VELOCITY_MM_S` |
+| 後肢→耳距離 | `< 50 mm` | `SCRATCH_MAX_HEAD_DIST_MM` |
+| 振動数 | `≥ 3` | `SCRATCH_MIN_OSCILLATIONS` |
+
+3 条件すべてを満たした場合、各条件の **超過マージン比** の算術平均で連続スコア `scratch_prob ∈ [0, 1]` を算出：
+
+```python
+s_speed = clip((v - v_thresh) / v_thresh, 0, 1)
+s_dist  = clip((d_thresh - d) / d_thresh, 0, 1)
+s_osc   = clip((osc - osc_thresh) / max(osc_thresh, 1), 0, 1)
+scratch_prob = clip((s_speed + s_dist + s_osc) / 3.0, 0, 1)
+scratch_flag = 1 if scratch_prob > 0 else 0
+```
+
+各成分は閾値のちょうど 2 倍に達したとき 1.0 となる設計です。
+
+### 6. Bout 検出
+
+- `BOUT_MIN_FRAMES = 5` 未満の検出区間は破棄。
+- `BOUT_MERGE_GAP = 10` フレーム以内の隣接区間は結合。
+- 時刻は **動画から取得した実測 FPS** で計算（環境変数 `DEFAULT_FPS = 30` にフォールバック）。
+
+### 7. 個体別観察時間正規化統計（`*_summary.csv`）
+
+```
+mouse_id, observation_duration_s, observation_duration_min,
+n_bouts, total_scratch_duration_s,
+scratch_rate_bouts_per_min,   ← 個体間比較に推奨
+scratch_rate_s_per_min,        ← 個体間比較に推奨
+mean_bout_duration_s, sem_bout_duration_s, median_bout_duration_s,
+longest_bout_s, fps_used
+```
+
+### 🔗 GUI ↔ バックエンド完全一致保証
+
+GUI の `recalculateFrameKinematics()` （手動補正後の即時再計算）と、パイプラインの `feature_extraction.py` は **同一の閾値・同一の式** で動作します（旧 px 基準ロジックは完全削除済み）。`/api/config` 経由でフロントエンドに送信される閾値：
+
+```
+SCRATCH_MIN_VELOCITY_MM_S, SCRATCH_MAX_HEAD_DIST_MM,
+SCRATCH_MIN_OSCILLATIONS, SCRATCH_MIN_OSC_AMPLITUDE_PX,
+SCRATCH_VELOCITY_SMOOTH_FRAMES, SCRATCH_WINDOW_FRAMES,
+BOUT_MIN_FRAMES, BOUT_MERGE_GAP, INTERPOLATION_MAX_GAP,
+PIXEL_TO_MM_RATIO, DEFAULT_FPS
+```
+
+---
+
+## 📂 プロジェクト構成
 
 ```text
 mouse-scratch-dashboard/
-├── index.html          # メインGUI：グラスモルフィズムを取り入れたプレミアムSPAダッシュボード
-├── index.css           # スタイリング：ダークモード、グラデーション、洗練されたアニメーション定義
-├── app.js              # メインロジック：動画同期再生、キーポイント座標の管理、一括補正、API連携
-├── charts.js           # グラフ描画：Chart.js を用いたスクラッチ確率・速度メトリクスのリアルタイム描画
-├── visualizer.js       # キャンバス描画：HTML5 Canvas を用いた骨格スケルトン・カラーサークルの可視化
-├── demoData.js         # デモ用データ：サーバーなしでもブラウザ単体でリッチな動作を検証できる高忠実度データ
-├── constants.js        # 共通定数：骨格接続構造（エッジ）やカラーパレット、キーポイントインデックスの定義
+├── index.html              # メイン GUI（SPA ダッシュボード）
+├── index.css               # ダークモード・グラデーションスタイル
+├── app.js                  # メインロジック（再生・補正・API 連携・mm 基準再計算）
+├── visualizer.js           # HTML5 Canvas 骨格描画 + ドラッグ操作
+├── charts.js               # Chart.js リアルタイム特徴量グラフ
+├── demoData.js             # オフライン動作用デモデータ
+├── constants.js            # フロント側共通定数（バックエンド config と同期）
 │
-├── app_server.py       # FastAPI サーバー：静的ファイル配信、結果ファイルリスト化、非同期解析Orchestrator
-├── pipeline.py         # 解析パイプライン：動画と骨格データを統合し、ID割り当て・特徴量計算・Bout抽出を実行
-├── pose_engine.py      # 姿勢推定エンジン：SLEAP (slp), YOLOv8 (pt), およびモック(Mock)エンジンのラッパー
-├── color_id.py         # 個体識別ロジック：HSV空間での色領域検出とスライディング窓による混同検知＆分割
-├── feature_extraction.py# キネマティクス抽出：線形補間、物理単位(mm)換算、ルールベースひっかき検出
-├── config.py           # 共通設定パラメータ：キーポイント構成、色範囲、ひっかき判定閾値、デフォルトFPS
+├── app_server.py           # FastAPI バックエンド（配信・非同期解析・評価 API）
+├── pipeline.py             # End-to-End 解析パイプライン
+├── pose_engine.py          # 姿勢推定エンジン（SLEAP / YOLOv8 / Mock）
+├── color_id.py             # 尾色 HSV → mouse_id + Identity Swap 分割
+├── feature_extraction.py   # 信頼度マスク・補間・mm 換算・スクラッチ判定
+├── evaluate.py             # フレーム / Bout レベル精度評価
+├── config.py               # キーポイント・色定義・全閾値の中央定義
 │
-├── test_color_id.py    # 結合テスト：自動 Identity Swap 分割ロジックの動作検証スクリプト
-├── test_pose_engine.py # ユニットテスト：エンジンフォールバック、フォーマット変換の品質検証用テスト
-├── models/             # モデル保管先：SLEAPの `.slp` や YOLOv8の `.pt` などの重みファイルを配置
-└── outputs/            # 解析結果出力先：モデル別、動画別に生成されたCSVや関連データが自動保存される
+├── test_color_id.py        # Identity Swap 分割結合テスト
+├── test_pose_engine.py     # エンジン抽象化ユニットテスト
+│
+├── requirements.txt        # pip 用依存定義
+├── environment.yml         # Conda + CUDA 環境定義
+├── setup.bat / start.bat   # Windows 環境向け起動スクリプト
+├── setup_models.py         # 事前学習モデル自動取得（Zenodo 等）
+│
+├── models/                 # 姿勢推定モデル配置先（.slp / .pt）
+└── outputs/                # 解析結果出力先（CSV / 評価結果）
 ```
 
 ---
 
-## 🔬 サイエンティフィック・データ品質と学術論文向けアプローチ
+## 🚀 セットアップと起動手順
 
-本システムは、実験室環境でのノイズや遮蔽（オクルージョン）に対応し、論文に耐えうる正確なキネマティクス指標を算出するため、以下のデータクレンジング処理をバックエンドに実装しています。
+### A. ローカル（GPU 推奨）
 
-### 1. 軌跡の欠損に対する線形補間 (Linear Interpolation)
-マウスの姿勢推定では、他個体との重なり合いやカメラの死角によって、関節点が一時的に検出漏れ（NaN）になるオクルージョン問題が頻繁に発生します。
-*   **アプローチ**: 本システムでは、最大 **5フレーム以内** の一時的な欠損に対して、線形補間を自動的に施して座標を滑らかに復元します。
-*   **効果**: 短時間のオクルージョンによる「ひっかき行動の瞬間的な検出途切れ（瞬きノイズ）」を防止し、正確な運動振幅を保ちます。
-
-### 2. NaN（欠損値）の厳密な伝搬と、盲目的ゼロ埋めの排除
-多くのナイーブな時系列処理では、欠損値を機械的に `0` で埋めてしまいます（`.fillna(0)`）。しかし、これは物理的な位置座標が突如原点 `(0, 0)` にジャンプしたことを意味し、速度・加速度の計算時に巨大なスパイク（異常値）を発生させます。
-*   **アプローチ**: 本システムでは、補間限界（5フレーム）を超える深刻な欠損値に関しては、**NaN（未検出）の状態を厳密に保持して伝搬**させます。
-*   **効果**: 座標の欠落しているフレームにおける速度や距離の算出結果も正しく NaN となり、行動分類器に誤った物理量を流し込むのを完全に防止します。
-
-### 3. 実物理単位（mm / mm_s）へのスケーリング
-ピクセル座標 `(px)` のみのデータでは、カメラの設置高やズーム倍率によって速度や距離の絶対値が変動してしまい、実験間の比較が困難になります。
-*   **アプローチ**: ダッシュボードおよびパイプライン上で「1ピクセルあたりの実寸法（mm/pixel比率）」を設定可能です（デフォルト：`0.25 mm/px`）。
-*   **出力メトリクス**:
-    *   `body_length_mm`（体長）
-    *   `hind_paw_speed_L_mm_s` / `hind_paw_speed_R_mm_s`（左右後肢の秒速 mm/s）
-    *   `hind_to_ear_dist_L_mm` / `hind_to_ear_dist_R_mm`（後肢から耳への距離 mm）
-
----
-
-## ⚙️ MockPoseEngine（インテリジェントフォールバック）について
-
-本システムは、学習済みモデルや実行ライブラリが不足している環境でもダッシュボードの体験やテストができるよう、**MockPoseEngine（ダミーデータ生成器）**への自動フォールバック機能を備えています。
-
-### ⚠️ 「ダミーデータ警告バナー」が表示される条件（モデルがない場合）
-以下のいずれかの条件に該当すると、システムは安全のためにMockPoseEngineを起動し、自然な4匹のマウスの軌跡データを擬似生成します。
-1.  **SLEAP使用時**: 環境に `sleap-track` コマンドがインストールされていない、または `models/` ディレクトリ内に `.slp` モデルが存在しない場合。
-2.  **YOLOv8使用時**: Pythonの `ultralytics` ライブラリがインストールされていない、または動画から骨格キーポイントが1点も検出されなかった場合。
-3.  **明示的な指定**: GUIの解析エンジン選択ドロップダウンで `Mock (ダミーデータ)` が明示的に選択された場合。
-
----
-
-## 🛠️ 技術スタック
-
-*   **フロントエンド**: Vanilla HTML5 (Dual Video, Canvas API), CSS3 (ダークテーマ, グラスモルフィズム, パルスアラート), Chart.js, Lucide Icons
-*   **バックエンド**: FastAPI (Uvicorn), OpenCV Python, Pandas, NumPy, h5py, Ultralytics YOLOv8
-
----
-
-## 🚀 使い方と起動手順
-
-### A. Google Colabでの起動とモデル比較（推奨）
-1.  リポジトリ内の [mouse_scratch_dashboard_colab.ipynb](mouse_scratch_dashboard_colab.ipynb) をGoogle Colabで開きます。
-2.  Google Driveをマウントし、プロジェクトフォルダをコピーします。
-3.  「**ステップ7: 4種類の手法による姿勢推定モデルの構築と一括比較解析**」を実行し、お好みのモデル（Zenodo、SLEAP公式、YOLOv8カスタム等）を自動構築します。
-4.  FastAPIサーバーを起動し、発行される `localtunnel` のURLをクリックしてダッシュボードを開きます。
-5.  ダッシュボード左上の「**比較解析結果の自動ロード**」ドロップダウンメニューから、各モデルの結果を自由に切り替えてロードし、骨格検出のブレやひっかき判定の精度を視覚的に比較検討します。
-
-### B. ローカルWebサーバーを起動して動作させる場合（フル機能）
-Python環境（3.9〜3.11推奨）をお持ちの場合、FastAPIバックエンドサーバーを起動することで、動画解析の実行や自動結果ロードのフル機能を利用できます。
-
-#### 1. 依存パッケージのインストール
-超高速パッケージマネージャ [uv](https://github.com/astral-sh/uv) を使用したインストール：
 ```bash
-# uv を使う場合（推奨、数秒で完了します）
-uv pip install -r requirements.txt
+# 1. リポジトリ取得
+cd mouse-scratch-dashboard
 
-# 通常の pip を使う場合
+# 2-a. Conda（GPU 環境）
+conda env create -f environment.yml
+conda activate mouse-scratch
+
+# 2-b. pip（CPU / Colab）
 pip install -r requirements.txt
-```
+# PyTorch は別途インストール（CUDA バージョンに応じて）:
+#   GPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   CPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-#### 2. FastAPI バックエンドサーバーの起動
-```bash
+# 3. FastAPI サーバー起動
 python app_server.py
+# → http://127.0.0.1:8000 でダッシュボードが開く
 ```
-起動すると、ブラウザで `http://127.0.0.1:8000` にアクセス可能になります。このダッシュボードでは、サーバー上の `outputs/` ディレクトリに保存された解析済みCSVファイルを自動でスキャン・検出して直接ロードできます。
 
-### C. ローカルWebダッシュボードの簡易表示 (インストール・サーバー不要)
-1.  Webブラウザでフォルダ内の `index.html` を直接開きます。
-2.  高忠実度なシミュレーションデータ（`demoData.js`）が自動でロードされます。
-3.  画面左下のインポートパネルに、フレームラベルCSV（例: `*_frame_labels.csv`）と対応する動画ファイル（`.mp4 / .mov` 等）をドラッグ＆ドロップすることで、実動画の上に骨格がオーバーレイした同期再生が開始されます。
+### B. Google Colab
 
----
+`mouse_scratch_dashboard_colab.ipynb` を Colab で開き、Drive マウント → セルを順に実行 → `localtunnel` の URL からダッシュボードにアクセス。
 
-## 💡 手動補正マニュアル
+### C. インストール不要のオフライン GUI 体験
 
-### 1. マーカー（関節点）の位置をその場で修正する
-1.  ダッシュボードの再生コントロールで `Pause`（一時停止）を押します。
-2.  Canvas上の修正したいキーポイント（例: `left_hind_paw`）をドラッグ＆ドロップで正しい位置へ移動させます。移動させると、ローリンググラフやキネマティクス特徴量がその場でリアルタイムに再計算されます。
-
-### 2. バルクオフセット（一括座標補正）
-1.  カメラ位置のズレなどで骨格全体が一定量ずれている場合、GUI左下の「一括マーカー補正 (Bulk Marker Offset)」パネルを開きます。
-2.  補正したいキーポイントを選択し、X移動量（dx）およびY移動量（dy）を入力します。
-3.  適用範囲（「現在フレームのみ」「ここから動画の最後まで」「動画の全フレーム」）を選択して `Apply Offset` を実行します。
-
-### 3. 個体IDの取り違え（混同）を手動で修正する
-1.  IDが入れ替わってしまった最初のフレームで動画を一時停止します。
-2.  左パネルの「個体ID手動入れ替え (Swap ID)」で入れ替え対象の2個体を選択し、`Swap Identities` を実行します。以降のデータが一瞬で入れ替わります。
-3.  修正後、右上の `Export Corrected Tracks (CSV)` をクリックして、完璧に補正されたCSVデータをダウンロードし、SimBA等での行動解析に引き渡します。
+`index.html` をブラウザで直接開くだけでデモデータがロードされ、フル機能を操作できます（解析パイプラインは非実行）。
 
 ---
 
-## 🔌 API エンドポイントリファレンス
+## 🛠️ 使用方法（パイプライン CLI / GUI）
 
-バックエンドサーバー（`app_server.py`）は、以下の軽量・高性能なREST APIを提供しています。
+### CLI でパイプラインを実行
+
+```bash
+python pipeline.py \
+    --video data/videos/cage_01.mp4 \
+    --engine yolov8 \
+    --model_path models/mouse_pose_v2.pt \
+    --px-to-mm 0.231 \              # ← 実測校正値（後述）
+    --fps 30 \
+    --out_dir outputs \
+    --gt data/gt/cage_01_gt.csv \   # ← 任意：精度評価
+    --gt-format frame \
+    --iou 0.5
+```
+
+出力（`outputs/cage_01_*.csv`）：
+- `cage_01_frame_labels.csv`：フレーム単位の全特徴量＋ scratch_flag / scratch_prob
+- `cage_01_bouts.csv`：Bout 単位の集計
+- `cage_01_summary.csv`：個体別観察時間正規化統計
+
+### GUI から実行
+
+1. ダッシュボードを開く → 動画ファイルをドロップ
+2. 「解析エンジン」（SLEAP / YOLOv8 / Mock）と pixel→mm 比を設定
+3. 「解析パイプラインを実行」をクリック → 非同期実行 → 完了後自動ロード
+
+### 手動補正手順
+
+| 操作 | 用途 |
+| --- | --- |
+| Canvas 上でキーポイントをドラッグ | 姿勢推定エラーをその場で修正、±15 フレームで mm 判定が即時再計算 |
+| **個体 ID 手動入れ替え** | パイプラインで補正しきれなかった混同を任意フレーム以降で一括スワップ |
+| **バルクオフセット** | カメラズレ等で骨格全体が一定量ずれている場合の dx/dy 一括補正 |
+| **Export Corrected Tracks (CSV)** | バックエンド再評価互換スキーマで補正後データをダウンロード |
+
+---
+
+## 📊 出力 CSV スキーマ
+
+### `*_frame_labels.csv`
+
+```
+frame_idx, track, mouse_id,
+scratch_flag, scratch_prob, scratch_prob_L, scratch_prob_R,
+<11 キーポイント> × {_x, _y, _conf},
+# px 系
+body_length_px, head_to_nose_dist,
+hind_to_head_dist_L, hind_to_head_dist_R,
+hind_to_ear_dist_L,  hind_to_ear_dist_R,
+hind_paw_speed_L,    hind_paw_speed_R,
+hind_osc_x_L, hind_osc_y_L, hind_osc_x_R, hind_osc_y_R,
+# mm 系（学術論文用）
+body_length_mm, head_to_nose_dist_mm,
+hind_to_head_dist_L_mm, hind_to_head_dist_R_mm,
+hind_to_ear_dist_L_mm,  hind_to_ear_dist_R_mm,
+hind_paw_speed_L_mm_s,  hind_paw_speed_R_mm_s,
+hind_paw_speed_L_mm_s_smooth, hind_paw_speed_R_mm_s_smooth,
+is_mock
+```
+
+### `*_bouts.csv`
+
+```
+mouse_id, bout_id, bout_start_frame, bout_end_frame,
+bout_start_time_s, bout_end_time_s, bout_duration_s,
+bout_n_frames, fps_used
+```
+
+### `*_summary.csv`
+
+§ スクラッチ判定アルゴリズム / 7 を参照。
+
+### GUI からの `corrected_tracks_<日付>.csv`
+
+`evaluate.py` 互換スキーマ（`is_scratch` + `scratch_flag` の両カラム、mm 系特徴量付き）。
+
+---
+
+## 🎯 グラウンドトゥルース評価
+
+### GT CSV フォーマット
+
+**Frame フォーマット**（推奨）：
+```csv
+frame_idx,mouse_id,is_scratch
+0,1,0
+1,1,0
+...
+123,1,1
+```
+
+**Bout フォーマット**：
+```csv
+mouse_id,start_frame,end_frame
+1,123,189
+```
+
+### 評価実行
+
+```bash
+python evaluate.py \
+    --auto  outputs/cage_01_frame_labels.csv \
+    --gt    data/gt/cage_01_gt.csv \
+    --format frame \
+    --fps 30 \
+    --iou 0.5 \
+    --out_dir outputs
+```
+
+出力：
+- `*_eval_frame.csv`：個体別 frame-level Precision / Recall / F1 / **Cohen's κ** / TP / FP / FN / TN
+- `*_eval_bout.csv`：個体別 bout-level Sensitivity / FDR / Precision_bout / F1_bout（temporal IoU ≥ 0.5）
+
+---
+
+## 🔌 API リファレンス
 
 | メソッド | パス | 説明 |
 | :--- | :--- | :--- |
-| `GET` | `/` | SPA メインダッシュボード（`index.html`）を返します。 |
-| `GET` | `/api/results` | `outputs/` 配下のロード可能な結果CSVファイルの一覧を再帰スキャンして返します。 |
-| `POST`| `/api/analyze` | 非同期で解析パイプラインを開始し、タスクIDを即座に発行します。 |
-| `GET` | `/api/status/{task_id}` | 指定されたタスクIDのリアルタイムログ、進捗率、結果ファイルのURLを取得します。 |
-| `GET` | `/outputs/{filename}` | 生成された結果ファイル（CSV等）を安全にダウンロードさせます。 |
-| `GET` | `/{filename}` | ダッシュボードに必要なJavaScript、CSS、検証用動画などの静的ファイルを配信します。 |
+| `GET`  | `/` | SPA ダッシュボードを返す |
+| `GET`  | `/api/config` | バックエンドの全閾値（mm 単位 + bout + 補間 + FPS）をフロントへ送信 |
+| `GET`  | `/api/results` | `outputs/` 配下の結果 CSV 一覧を再帰スキャン |
+| `POST` | `/api/analyze` | 非同期で解析パイプラインを起動。`task_id` を発行 |
+| `GET`  | `/api/status/{task_id}` | 進捗・ログ・結果 URL を取得 |
+| `POST` | `/api/evaluate` | サーバー上で `evaluate.py` を実行し精度指標を返す |
+| `GET`  | `/outputs/{filename}` | 結果ファイル（CSV）の配信 |
+| `GET`  | `/{filename}` | 静的ファイル（JS / CSS / 動画）の配信 |
 
 ---
 
-## 🧪 テストの実行方法
+## 🎓 学術利用上の必須事項
 
-システムの品質とアライメント精度の整合性を担保するため、以下のテストを実行可能です。
+### ✅ 論文化前に必ず実施
 
-#### 1. Identity Swap 自動検出・分割の結合テスト
+1. **手動アノテーションとの照合（必須）**
+   本システムのスクラッチ検出は **ヒューリスティック** であり、SOTA 機械学習モデルではありません。論文に使用する前に、対象実験動画の **手動アノテーション（最低 30 分 / マウス推奨）** を作成し、`evaluate.py` で frame-level **Precision / Recall / F1 / Cohen's κ** および bout-level **Sensitivity / FDR / F1（temporal IoU ≥ 0.5）** を必ず報告してください。
+
+2. **PIXEL_TO_MM_RATIO のカメラ別実測校正（必須）**
+   デフォルト値 `0.25 mm/px` は仮の値です。各カメラ設置位置で **物差し・キャリブレーション物体を撮影し、ピクセル距離 ÷ 既知の実距離 mm** から実測値を算出して `--px-to-mm <値>` で指定してください。未校正だと **mm/s 速度・mm 距離の絶対値は無意味** となり、実験間比較に使えません。デフォルト値使用時はパイプラインが警告を出力します。
+
+3. **マウス専用学習モデルの使用（強く推奨）**
+   `Yolov8PoseEngine` は 17 点（COCO 人間用）モデルも動作しますが、`nose=0` を `nose` と `head_center` 両方に流用する近似マッピングのため、距離特徴量（`head_to_nose_dist` 等）が退化します。**マウス用に学習された 11 点モデル**（カスタム YOLOv8 または SLEAP）を使用してください。
+
+4. **MockPoseEngine データの完全除外**
+   `is_mock=1` のフレームを含む CSV は論文用途では破棄してください。GUI にも赤色警告バンドが表示されます。
+
+5. **FPS の実測値使用**
+   パイプラインは動画から FPS を自動取得しますが、可変フレームレート（VFR）動画の場合は `ffmpeg -i input.mp4` で実測 FPS を確認し `--fps <値>` で指定してください。
+
+### 📐 推奨報告事項（論文 Methods 節）
+
+> Pose estimation was performed using SLEAP (Pereira et al., 2022) [or YOLOv8-pose; cite Jocher et al.] with a custom model trained on N annotated frames of laboratory mice in top-down view. Individual identity was assigned via colored tail-paint (red, blue, yellow, black) tracked by HSV-based sliding-window voting over 30 frames, with automatic track splitting upon identity-swap detection. Scratching bouts were detected by a three-condition rule: smoothed hind-paw speed > 150 mm/s (averaged over 5 frames), hind-paw-to-ear distance < 50 mm, and ≥ 3 directional reversals (minimum oscillation amplitude 3 px) within a 15-frame window. Pixel-to-mm calibration was performed per camera at 0.XXX mm/px (measured against a reference ruler at the cage floor). Bouts shorter than 5 frames were discarded; adjacent bouts within 10 frames were merged. Inter-rater reliability against manual annotation was Cohen's κ = X.XX (frame-level), with Sensitivity X.XX / FDR X.XX at temporal IoU ≥ 0.5 (bout-level).
+
+---
+
+## ⚠️ 既知の制約と既知のバグ
+
+| 項目 | 影響 | 回避策 |
+| --- | --- | --- |
+| **ルールベースの普遍性なし** | スクラッチ閾値は野生型成体マウス向けに調整。仔マウス / 病態モデル / 異なる撮影条件では再調整が必要 | `config.py` の閾値を実験条件ごとに調整し、必ず GT 評価で確認 |
+| **尾色 ID の黒色** | HSV V ≤ 40 はケージの影と混同しやすい。集団飼育＋尾遮蔽で頻発 | 黒以外（赤・青・黄）の 3 色＋未着色（白マウス）構成を推奨。または近赤外マーカー使用 |
+| **HSV 範囲はカメラ依存** | 照明条件が変わると識別精度が落ちる | 照明条件ごとに `MOUSE_COLORS` を再キャリブレート |
+| **PIXEL_TO_MM_RATIO 未校正** | mm/s・mm の絶対値が無意味になる | カメラ設置ごとに必ず実測（§学術利用上の必須事項 / 2） |
+| **VFR 動画** | 可変フレームレート動画では時刻が不正確になる | `ffmpeg` で固定フレームレートに再エンコード推奨 |
+| **2D 距離のみ** | 高さ方向の動きを捉えられない（top-down 想定） | 真上から撮影、または mm ratio をケージ床面で校正 |
+| **頭部直撃以外のスクラッチ** | `hind_to_ear_dist < 50 mm` 条件は耳周辺特化。背中などのスクラッチは非対応 | 別の閾値設計（`hind_to_<target>_dist`）が必要 |
+
+---
+
+## 🧪 テスト
+
 ```bash
+# Identity Swap 自動分割の結合テスト（test_swap.mp4 を自動生成）
 python test_color_id.py
-```
-※赤と青のマウスが50フレーム目に交差（Identity Swap）するシミュレーション動画 `test_swap.mp4` をその場で生成し、スライディング窓によって正しくトラックが自動分割されるかをテストします。
 
-#### 2. 姿勢推定エンジンおよびフォーマット変換のユニットテスト
-```bash
+# 姿勢推定エンジン抽象化のユニットテスト
 python -m unittest test_pose_engine.py
+
+# 全パイプラインの E2E スモークテスト（任意の動画で）
+python pipeline.py --video test_swap.mp4 --engine mock --out_dir outputs/_smoke
 ```
-※GPU検出の整合性、ロング・ワイドフォーマット変換の正確さ、SLEAP/YOLOv8 が未インストールの環境下で MockPoseEngine へのフォールバックが機能するかを網羅的に検証します。
+
+---
+
+## 📝 ライセンス / 引用
+
+研究で本システムを使用された場合は、リポジトリと共に以下の上流ツールを引用してください：
+
+- SLEAP: Pereira et al., *Nat. Methods* (2022)
+- YOLOv8: Jocher et al., Ultralytics (2023)
+- OpenCV: Bradski, *Dr. Dobb's J.* (2000)
+
+本リポジトリは MIT ライセンスで公開予定です（執筆時点では未確定）。

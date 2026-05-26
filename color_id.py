@@ -157,8 +157,10 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame) -> pd.DataFrame:
         
         ret, frame = cap.read()
         if not ret:
-            print(f"[Warning] フレーム {frame_idx} の読み込みに失敗しました。")
-            break
+            # 1 フレームの読み込み失敗で以降を全て破棄しないよう、当該フレームのみスキップして継続する。
+            # last_frame_idx は更新しないため、次の有効フレームで自動的にシークし直される。
+            print(f"[Warning] フレーム {frame_idx} の読み込みに失敗しました。当該フレームをスキップして継続します。")
+            continue
         last_frame_idx = frame_idx
 
         for _, row in rows.iterrows():

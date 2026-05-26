@@ -103,6 +103,13 @@ async def get_config():
         "SCRATCH_MIN_OSCILLATIONS":       config.SCRATCH_MIN_OSCILLATIONS,
         "SCRATCH_MIN_OSC_AMPLITUDE_PX":   config.SCRATCH_MIN_OSC_AMPLITUDE_PX,
         "SCRATCH_VELOCITY_SMOOTH_FRAMES": config.SCRATCH_VELOCITY_SMOOTH_FRAMES,
+        "SCRATCH_WINDOW_FRAMES":          config.SCRATCH_WINDOW_FRAMES,
+        # Bout 後処理パラメータ（フロント GUI 側の再 Bout 化で同一閾値を使用する）
+        "BOUT_MIN_FRAMES":                config.BOUT_MIN_FRAMES,
+        "BOUT_MERGE_GAP":                 config.BOUT_MERGE_GAP,
+        # 補間パラメータ
+        "INTERPOLATION_MAX_GAP":          config.INTERPOLATION_MAX_GAP,
+        # カメラ・FPS
         "PIXEL_TO_MM_RATIO":              config.PIXEL_TO_MM_RATIO,
         "DEFAULT_FPS":                    config.DEFAULT_FPS,
         # 後方互換 (px 単位, DEPRECATED)

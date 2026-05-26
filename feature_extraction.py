@@ -226,8 +226,8 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
 
         # バッファの初期化
         feats = {col: [] for col in feature_cols}
-        prev_x_L, prev_y_L = None, None
-        prev_x_R, prev_y_R = None, None
+        prev_x_L, prev_y_L, prev_f_L = None, None, None
+        prev_x_R, prev_y_R, prev_f_R = None, None, None
         x_hist_L, y_hist_L = [], []
         x_hist_R, y_hist_R = [], []
         vel_L_buf = deque(maxlen=SCRATCH_VELOCITY_SMOOTH_FRAMES)  # [4]
@@ -235,6 +235,7 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
 
         for idx in indices:
             row = sorted_grp.loc[idx]
+            curr_f = row["frame_idx"]
 
             def get_xy(kp):
                 return row.get(f"{kp}_x", np.nan), row.get(f"{kp}_y", np.nan)
@@ -256,18 +257,32 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
             hind_to_ear_L_px  = compute_distance(hind_l_x, hind_l_y, ear_l_x,  ear_l_y)
             hind_to_ear_R_px  = compute_distance(hind_r_x, hind_r_y, ear_r_x,  ear_r_y)
 
-            # ── B. フレーム間速度（生値 px/frame） ──────────────────────────
-            if prev_x_L is not None and not np.isnan(hind_l_x) and not np.isnan(prev_x_L):
-                speed_L_px = compute_distance(hind_l_x, hind_l_y, prev_x_L, prev_y_L)
+            # ── B. フレーム間速度（px/frame, 欠損フレーム差を考慮） ──────────
+            # 直近の「有効な」後肢座標との変位をフレーム差で割り、1 フレームあたりに
+            # 正規化する。トラックが途中で欠損して数フレーム飛んでいる区間で、隣接行を
+            # 1 フレーム差として扱い速度が過大評価されるのを防ぐ。欠損が補間限界
+            # (INTERPOLATION_MAX_GAP) を超える区間は信頼できないため速度を NaN とする。
+            if prev_x_L is not None and not np.isnan(hind_l_x):
+                gap_L = curr_f - prev_f_L
+                if 1 <= gap_L <= INTERPOLATION_MAX_GAP + 1:
+                    speed_L_px = compute_distance(hind_l_x, hind_l_y, prev_x_L, prev_y_L) / gap_L
+                else:
+                    speed_L_px = np.nan
             else:
                 speed_L_px = np.nan
-            prev_x_L, prev_y_L = hind_l_x, hind_l_y
+            if not np.isnan(hind_l_x):
+                prev_x_L, prev_y_L, prev_f_L = hind_l_x, hind_l_y, curr_f
 
-            if prev_x_R is not None and not np.isnan(hind_r_x) and not np.isnan(prev_x_R):
-                speed_R_px = compute_distance(hind_r_x, hind_r_y, prev_x_R, prev_y_R)
+            if prev_x_R is not None and not np.isnan(hind_r_x):
+                gap_R = curr_f - prev_f_R
+                if 1 <= gap_R <= INTERPOLATION_MAX_GAP + 1:
+                    speed_R_px = compute_distance(hind_r_x, hind_r_y, prev_x_R, prev_y_R) / gap_R
+                else:
+                    speed_R_px = np.nan
             else:
                 speed_R_px = np.nan
-            prev_x_R, prev_y_R = hind_r_x, hind_r_y
+            if not np.isnan(hind_r_x):
+                prev_x_R, prev_y_R, prev_f_R = hind_r_x, hind_r_y, curr_f
 
             # ── C. 物理単位換算 ──────────────────────────────────────────────
             def _mm(v_px): return v_px * pixel_to_mm_ratio if not np.isnan(v_px) else np.nan

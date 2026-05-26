@@ -36,6 +36,101 @@ def detect_gpu_device() -> str:
         return "cpu"
 
 
+# ── SLEAP analysis HDF5 の正準パーサ ─────────────────────────────────────────
+# SLEAP の analysis HDF5 は、ディスク上では tracks=(n_tracks, 2, n_nodes, n_frames)、
+# point_scores=(n_tracks, n_nodes, n_frames) というレイアウトで格納される。
+# SLEAP 公式の解析例でも f["tracks"][:].T のように転置して使うのが正しい。
+# （旧実装は転置せず (n_frames, n_nodes, 2, n_tracks) と誤って仮定していたため、
+#   実 SLEAP ファイルでは次元が入れ替わり IndexError → モックへ静かにフォールバックしていた）
+
+def _normalize_sleap_track_array(tracks: np.ndarray, n_nodes_expected: int) -> np.ndarray:
+    """tracks を内部標準の (n_frames, n_nodes, 2, n_tracks) に正規化する。"""
+    if tracks.ndim != 4:
+        raise ValueError(f"想定外のトラックデータ形状です: {tracks.shape}")
+    # 既に (frames, nodes, 2, tracks) の並びならそのまま使う
+    if tracks.shape[2] == 2 and tracks.shape[1] == n_nodes_expected:
+        return tracks
+    # SLEAP 標準の (tracks, 2, nodes, frames) → 完全転置で (frames, nodes, 2, tracks)
+    if tracks.shape[1] == 2 and tracks.shape[2] == n_nodes_expected:
+        return tracks.T
+    # どちらにも当てはまらない場合でも、coords 軸が末尾 2 になるよう SLEAP 公式に従い転置を試みる
+    transposed = tracks.T
+    if transposed.shape[2] == 2:
+        return transposed
+    raise ValueError(
+        f"SLEAP tracks 配列の軸を解釈できませんでした: shape={tracks.shape}, n_nodes={n_nodes_expected}"
+    )
+
+
+def _normalize_sleap_scores(scores, n_frames: int, n_nodes_expected: int, n_tracks: int):
+    """point_scores を (n_frames, n_nodes, n_tracks) に正規化する。解釈不能なら None。"""
+    if scores is None or getattr(scores, "ndim", 0) != 3:
+        return None
+    if scores.shape == (n_frames, n_nodes_expected, n_tracks):
+        return scores
+    transposed = scores.T  # (tracks, nodes, frames) → (frames, nodes, tracks)
+    if transposed.shape == (n_frames, n_nodes_expected, n_tracks):
+        return transposed
+    return None  # 形状が一致しない場合は誤対応を避けるため使用しない
+
+
+def parse_sleap_analysis_h5(h5_path: str) -> pd.DataFrame:
+    """
+    SLEAP analysis HDF5 を読み込み、共通ロングフォーマット
+    (frame, track, keypoint, x, y, conf, is_mock) の DataFrame を返す。
+    conf には可能なら SLEAP の point_scores（キーポイント信頼度）を使用する。
+    """
+    import h5py
+    with h5py.File(h5_path, "r") as f:
+        if "node_names" not in f or "tracks" not in f:
+            raise ValueError("SLEAP H5ファイルのスキーマが期待と異なります（node_names または tracks がありません）。")
+
+        node_names = [n.decode("utf-8") for n in f["node_names"][:]]
+        tracks = _normalize_sleap_track_array(f["tracks"][:], len(node_names))
+        n_frames, n_nodes, _n_coords, n_tracks = tracks.shape
+
+        scores_raw = f["point_scores"][:] if "point_scores" in f else None
+        scores = _normalize_sleap_scores(scores_raw, n_frames, len(node_names), n_tracks)
+        if scores_raw is not None and scores is None:
+            print("[pose_engine] [Warning] point_scores の形状を解釈できなかったため、"
+                  "信頼度は座標の有無から推定します。")
+        elif scores is None:
+            print("[pose_engine] [Warning] point_scores データセットが存在しないため、"
+                  "信頼度は座標の有無から推定します（全有効点を conf=1.0 とみなします）。")
+
+        print(f"[pose_engine] [Info] SLEAP ロード完了: フレーム数={n_frames}, "
+              f"ノード数={n_nodes}, トラック数={n_tracks}, 信頼度={'point_scores' if scores is not None else '座標有無'}")
+
+        records = []
+        for t_idx in range(n_tracks):
+            track_name = f"track_{t_idx}"
+            for f_idx in range(n_frames):
+                frame_coords = tracks[f_idx, :, :, t_idx]  # (n_nodes, 2)
+                if np.isnan(frame_coords).all():
+                    continue
+                for n_idx, node in enumerate(node_names):
+                    if node not in KEYPOINTS:
+                        continue
+                    x = frame_coords[n_idx, 0]
+                    y = frame_coords[n_idx, 1]
+                    valid = not (np.isnan(x) or np.isnan(y))
+                    if scores is not None:
+                        s = scores[f_idx, n_idx, t_idx]
+                        conf = float(s) if (valid and not np.isnan(s)) else 0.0
+                    else:
+                        conf = 1.0 if valid else 0.0
+                    records.append({
+                        "frame": int(f_idx),
+                        "track": track_name,
+                        "keypoint": node,
+                        "x": float(x) if valid else np.nan,
+                        "y": float(y) if valid else np.nan,
+                        "conf": conf,
+                        "is_mock": 0,
+                    })
+        return pd.DataFrame(records)
+
+
 # ── 基底クラス（インターフェース） ───────────────────────────────────────────
 
 class BasePoseEngine:
@@ -158,45 +253,9 @@ class SleapEngine(BasePoseEngine):
     def _load_and_parse_h5(self, h5_path: str) -> pd.DataFrame:
         """
         SLEAP H5ファイルをロードし、共通ロングフォーマットに展開します。
+        次元正規化と point_scores（信頼度）の読み込みは parse_sleap_analysis_h5 に委譲します。
         """
-        import h5py
-        with h5py.File(h5_path, "r") as f:
-            if "node_names" not in f or "tracks" not in f:
-                raise ValueError("SLEAP H5ファイルのスキーマが期待と異なります。")
-
-            node_names = [n.decode("utf-8") for n in f["node_names"][:]]
-            tracks = f["tracks"][:] # 形状: (n_frames, n_nodes, 2, n_tracks)
-            
-            if len(tracks.shape) != 4:
-                raise ValueError(f"想定外のトラックデータ形状です: {tracks.shape}")
-                
-            n_frames, n_nodes, n_coords, n_tracks = tracks.shape
-            
-            records = []
-            for t_idx in range(n_tracks):
-                track_name = f"track_{t_idx}"
-                for f_idx in range(n_frames):
-                    frame_track_coords = tracks[f_idx, :, :, t_idx] # (n_nodes, 2)
-                    if np.isnan(frame_track_coords).all():
-                        continue
-                        
-                    for n_idx, node in enumerate(node_names):
-                        if node in KEYPOINTS:
-                            x = frame_track_coords[n_idx, 0]
-                            y = frame_track_coords[n_idx, 1]
-                            
-                            conf = 0.0 if (np.isnan(x) or np.isnan(y)) else 1.0
-                            records.append({
-                                "frame": int(f_idx),
-                                "track": track_name,
-                                "keypoint": node,
-                                "x": float(x) if not np.isnan(x) else np.nan,
-                                "y": float(y) if not np.isnan(y) else np.nan,
-                                "conf": float(conf),
-                                "is_mock": 0
-                            })
-                            
-            return pd.DataFrame(records)
+        return parse_sleap_analysis_h5(h5_path)
 
 
 # ── YOLOv8-pose 姿勢推定エンジン ─────────────────────────────────────────────
@@ -224,70 +283,50 @@ class Yolov8PoseEngine(BasePoseEngine):
             fallback_engine = MockPoseEngine(self.model_path, self.device)
             return fallback_engine.run(video_path)
 
-        # モデルのロード（指定がない場合は標準モデル）
+        # モデルのロード（指定がない場合は標準モデル）。
+        # モデルファイルの欠損・破損や推論失敗でパイプライン全体が落ちないよう、
+        # ロード・推論を例外保護し、失敗時は ImportError と同様に Mock へフォールバックする。
         model_name = self.model_path if self.model_path else "yolov8n-pose.pt"
         print(f"[pose_engine] [Info] YOLOv8-pose モデルをロード中: {model_name}")
-        model = YOLO(model_name)
-
-        print(f"[pose_engine] [Info] YOLOv8-poseによる姿勢推定を開始します: {video_path} (デバイス: {self.device})")
-        results = model.track(source=video_path, device=self.device, persist=True, stream=True)
+        try:
+            model = YOLO(model_name)
+            print(f"[pose_engine] [Info] YOLOv8-poseによる姿勢推定を開始します: {video_path} (デバイス: {self.device})")
+            results = model.track(source=video_path, device=self.device, persist=True, stream=True)
+        except Exception as e:
+            print(f"[pose_engine] [Error] YOLOv8モデルのロードまたは推論に失敗しました: {e}")
+            print("[pose_engine] [Fallback] 自動的にMockPoseEngineにフォールバックします。")
+            fallback_engine = MockPoseEngine(self.model_path, self.device)
+            return fallback_engine.run(video_path)
 
         records = []
-        for f_idx, r in enumerate(results):
-            # キーポイント (N, 17, 3) などの形状。YOLOv8標準は17点
-            keypoints_data = r.keypoints
-            if keypoints_data is None:
-                continue
-                
-            # 各検出個体の座標情報を展開
-            xy = keypoints_data.xy.cpu().numpy()     # (num_instances, num_kps, 2)
-            conf = keypoints_data.conf.cpu().numpy() if keypoints_data.conf is not None else None # (num_instances, num_kps)
-            
-            # トラックIDの取得
-            if r.boxes is not None and r.boxes.id is not None:
-                track_ids = r.boxes.id.int().cpu().tolist()
-            else:
-                track_ids = list(range(len(xy)))
+        try:
+            for f_idx, r in enumerate(results):
+                # キーポイント (N, 17, 3) などの形状。YOLOv8標準は17点
+                keypoints_data = r.keypoints
+                if keypoints_data is None:
+                    continue
 
-            for idx, track_id in enumerate(track_ids):
-                track_name = f"track_{track_id}"
-                inst_xy = xy[idx]
-                inst_conf = conf[idx] if conf is not None else [1.0] * len(inst_xy)
-                
-                # キーポイント数が本システムの定義と一致するかチェック
-                if len(inst_xy) == len(KEYPOINTS):
-                    # カスタムモデルとしてそのままマッピング
-                    for kp_idx, kp_name in enumerate(KEYPOINTS):
-                        px, py = inst_xy[kp_idx]
-                        p_conf = inst_conf[kp_idx]
-                        records.append({
-                            "frame": int(f_idx),
-                            "track": track_name,
-                            "keypoint": kp_name,
-                            "x": float(px),
-                            "y": float(py),
-                            "conf": float(p_conf),
-                            "is_mock": 0
-                        })
+                # 各検出個体の座標情報を展開
+                xy = keypoints_data.xy.cpu().numpy()     # (num_instances, num_kps, 2)
+                conf = keypoints_data.conf.cpu().numpy() if keypoints_data.conf is not None else None # (num_instances, num_kps)
+
+                # トラックIDの取得
+                if r.boxes is not None and r.boxes.id is not None:
+                    track_ids = r.boxes.id.int().cpu().tolist()
                 else:
-                    # 標準17点モデルからの近似マッピング
-                    mapping = {
-                        "nose": 0,
-                        "left_ear": 3,
-                        "right_ear": 4,
-                        "head_center": 0,      # 近似
-                        "neck": 5,             # 肩を首の代わりとする
-                        "left_fore_paw": 9,    # 手首
-                        "right_fore_paw": 10,  # 手首
-                        "spine_mid": 11,       # 臀部近傍
-                        "left_hind_paw": 15,   # 足首
-                        "right_hind_paw": 16,  # 足首
-                        "tail_base": 12,       # 臀部
-                    }
-                    for kp_name, yolo_idx in mapping.items():
-                        if yolo_idx < len(inst_xy):
-                            px, py = inst_xy[yolo_idx]
-                            p_conf = inst_conf[yolo_idx]
+                    track_ids = list(range(len(xy)))
+
+                for idx, track_id in enumerate(track_ids):
+                    track_name = f"track_{track_id}"
+                    inst_xy = xy[idx]
+                    inst_conf = conf[idx] if conf is not None else [1.0] * len(inst_xy)
+
+                    # キーポイント数が本システムの定義と一致するかチェック
+                    if len(inst_xy) == len(KEYPOINTS):
+                        # カスタムモデルとしてそのままマッピング
+                        for kp_idx, kp_name in enumerate(KEYPOINTS):
+                            px, py = inst_xy[kp_idx]
+                            p_conf = inst_conf[kp_idx]
                             records.append({
                                 "frame": int(f_idx),
                                 "track": track_name,
@@ -297,6 +336,49 @@ class Yolov8PoseEngine(BasePoseEngine):
                                 "conf": float(p_conf),
                                 "is_mock": 0
                             })
+                    else:
+                        # ⚠️ 学術利用警告：標準 17 点 (COCO 人間用) → マウス 11 点の近似マッピング。
+                        # nose=0 を 'nose' と 'head_center' の両方に流用するなど解剖学的に厳密でないため、
+                        # 距離特徴量 (`head_to_nose_dist` 等) は退化値となる。学術論文用途では
+                        # マウス専用学習モデル (custom yolov8 / SLEAP) を必ず使用すること。
+                        if f_idx == 0:
+                            print("[pose_engine] [Warning] ⚠️ 学術利用注意：標準 17 点 (人間 COCO) モデルを近似マッピングで使用しています。"
+                                  "解剖学的に正確ではないため、結果は学術論文に使用しないでください。"
+                                  "マウス専用に学習したモデル (custom YOLOv8 / SLEAP) を使用してください。")
+                        mapping = {
+                            "nose": 0,
+                            "left_ear": 3,
+                            "right_ear": 4,
+                            "head_center": 0,      # 近似 (= nose) — ⚠️ head_to_nose_dist が常に 0 になる
+                            "neck": 5,             # 肩を首の代わりとする
+                            "left_fore_paw": 9,    # 手首
+                            "right_fore_paw": 10,  # 手首
+                            "spine_mid": 11,       # 臀部近傍
+                            "left_hind_paw": 15,   # 足首
+                            "right_hind_paw": 16,  # 足首
+                            "tail_base": 12,       # 臀部
+                        }
+                        for kp_name, yolo_idx in mapping.items():
+                            if yolo_idx < len(inst_xy):
+                                px, py = inst_xy[yolo_idx]
+                                p_conf = inst_conf[yolo_idx]
+                                records.append({
+                                    "frame": int(f_idx),
+                                    "track": track_name,
+                                    "keypoint": kp_name,
+                                    "x": float(px),
+                                    "y": float(py),
+                                    "conf": float(p_conf),
+                                    "is_mock": 0
+                                })
+        except Exception as e:
+            # ストリーム推論の途中で失敗した場合: 部分結果があればそれを返し、無ければ Mock へ。
+            print(f"[pose_engine] [Error] YOLOv8推論の処理中にエラーが発生しました: {e}")
+            if not records:
+                print("[pose_engine] [Fallback] 有効な検出が無いため、MockPoseEngineにフォールバックします。")
+                fallback_engine = MockPoseEngine(self.model_path, self.device)
+                return fallback_engine.run(video_path)
+            print("[pose_engine] [Warning] 取得済みの部分的な検出結果を返します。")
 
         if not records:
             # 検出できなかった場合はモックにフォールバック

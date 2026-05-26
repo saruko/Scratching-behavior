@@ -98,6 +98,16 @@ def evaluate_frames(
              [mouse_id, n_frames, precision, recall, f1, kappa, tp, fp, fn, tn]
     """
     # 自動結果を標準化
+    # パイプライン出力は scratch_flag 列を使うため、is_scratch が無ければ scratch_flag を採用する。
+    auto_df = auto_df.copy()
+    if "is_scratch" not in auto_df.columns:
+        if "scratch_flag" in auto_df.columns:
+            auto_df["is_scratch"] = auto_df["scratch_flag"]
+        else:
+            raise ValueError(
+                "自動検出CSVに 'is_scratch' も 'scratch_flag' も見つかりません。"
+                "パイプライン出力の *_frame_labels.csv を指定してください。"
+            )
     auto = auto_df[["frame_idx", "mouse_id", "is_scratch"]].copy()
     auto["is_scratch"] = auto["is_scratch"].fillna(0).astype(int)
 

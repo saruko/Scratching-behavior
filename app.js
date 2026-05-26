@@ -39,9 +39,21 @@ document.addEventListener('DOMContentLoaded', () => {
         return res.json();
     })
     .then(cfg => {
-        if (cfg.SCRATCH_MIN_VELOCITY) SCRATCH_THRESHOLDS.minVelocity = cfg.SCRATCH_MIN_VELOCITY;
+        // mm 基準（バックエンドの判定と同じ閾値・パラメータ）
+        if (cfg.SCRATCH_MIN_VELOCITY_MM_S      != null) SCRATCH_THRESHOLDS.minVelocityMmS       = cfg.SCRATCH_MIN_VELOCITY_MM_S;
+        if (cfg.SCRATCH_MAX_HEAD_DIST_MM       != null) SCRATCH_THRESHOLDS.maxHeadDistMm        = cfg.SCRATCH_MAX_HEAD_DIST_MM;
+        if (cfg.SCRATCH_MIN_OSCILLATIONS       != null) SCRATCH_THRESHOLDS.minOscillations      = cfg.SCRATCH_MIN_OSCILLATIONS;
+        if (cfg.SCRATCH_MIN_OSC_AMPLITUDE_PX   != null) SCRATCH_THRESHOLDS.minOscAmplitudePx    = cfg.SCRATCH_MIN_OSC_AMPLITUDE_PX;
+        if (cfg.SCRATCH_VELOCITY_SMOOTH_FRAMES != null) SCRATCH_THRESHOLDS.velocitySmoothFrames = cfg.SCRATCH_VELOCITY_SMOOTH_FRAMES;
+        if (cfg.SCRATCH_WINDOW_FRAMES          != null) SCRATCH_THRESHOLDS.windowFrames         = cfg.SCRATCH_WINDOW_FRAMES;
+        if (cfg.BOUT_MIN_FRAMES                != null) SCRATCH_THRESHOLDS.boutMinFrames         = cfg.BOUT_MIN_FRAMES;
+        if (cfg.BOUT_MERGE_GAP                 != null) SCRATCH_THRESHOLDS.boutMergeGap          = cfg.BOUT_MERGE_GAP;
+        if (cfg.INTERPOLATION_MAX_GAP          != null) SCRATCH_THRESHOLDS.interpolationMaxGap   = cfg.INTERPOLATION_MAX_GAP;
+        if (cfg.PIXEL_TO_MM_RATIO              != null) SCRATCH_THRESHOLDS.pixelToMmRatio       = cfg.PIXEL_TO_MM_RATIO;
+        if (cfg.DEFAULT_FPS                    != null) SCRATCH_THRESHOLDS.fps                  = cfg.DEFAULT_FPS;
+        // 後方互換: 表示フォールバック用の px 値
+        if (cfg.SCRATCH_MIN_VELOCITY)  SCRATCH_THRESHOLDS.minVelocity  = cfg.SCRATCH_MIN_VELOCITY;
         if (cfg.SCRATCH_MAX_HEAD_DIST) SCRATCH_THRESHOLDS.maxHeadDist = cfg.SCRATCH_MAX_HEAD_DIST;
-        if (cfg.SCRATCH_MIN_OSCILLATIONS) SCRATCH_THRESHOLDS.minOscillations = cfg.SCRATCH_MIN_OSCILLATIONS;
         console.log("[Config] Loaded thresholds from backend:", SCRATCH_THRESHOLDS);
     })
     .catch(err => {
@@ -220,11 +232,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const feats = mouseData.features;
 
-        // 物理単位の取得 (CSVに物理カラムがない場合はピクセル値から概算)
-        const speedL_mm = feats.hind_paw_speed_L_mm_s !== undefined && feats.hind_paw_speed_L_mm_s !== null && !isNaN(feats.hind_paw_speed_L_mm_s) ? feats.hind_paw_speed_L_mm_s.toFixed(1) : (feats.hind_paw_speed_L * 0.25 * appState.data.fps).toFixed(1);
-        const speedR_mm = feats.hind_paw_speed_R_mm_s !== undefined && feats.hind_paw_speed_R_mm_s !== null && !isNaN(feats.hind_paw_speed_R_mm_s) ? feats.hind_paw_speed_R_mm_s.toFixed(1) : (feats.hind_paw_speed_R * 0.25 * appState.data.fps).toFixed(1);
-        const distL_mm = feats.hind_to_ear_dist_L_mm !== undefined && feats.hind_to_ear_dist_L_mm !== null && !isNaN(feats.hind_to_ear_dist_L_mm) ? feats.hind_to_ear_dist_L_mm.toFixed(1) : (feats.hind_to_ear_dist_L * 0.25).toFixed(1);
-        const distR_mm = feats.hind_to_ear_dist_R_mm !== undefined && feats.hind_to_ear_dist_R_mm !== null && !isNaN(feats.hind_to_ear_dist_R_mm) ? feats.hind_to_ear_dist_R_mm.toFixed(1) : (feats.hind_to_ear_dist_R * 0.25).toFixed(1);
+        // 物理単位の取得: 平滑化速度を優先 → 非平滑 mm/s → px 換算（比率は SCRATCH_THRESHOLDS から取得）
+        const _disp_ratio = SCRATCH_THRESHOLDS.pixelToMmRatio;
+        const _disp_fps   = appState.data.fps || SCRATCH_THRESHOLDS.fps;
+        function _toMmS(smooth, mms, px) {
+            if (smooth != null && !isNaN(smooth)) return smooth.toFixed(1);
+            if (mms    != null && !isNaN(mms))    return mms.toFixed(1);
+            return (px * _disp_ratio * _disp_fps).toFixed(1);
+        }
+        function _toMm(mm, px) {
+            if (mm != null && !isNaN(mm)) return mm.toFixed(1);
+            return (px * _disp_ratio).toFixed(1);
+        }
+        const speedL_mm = _toMmS(feats.hind_paw_speed_L_mm_s_smooth, feats.hind_paw_speed_L_mm_s, feats.hind_paw_speed_L);
+        const speedR_mm = _toMmS(feats.hind_paw_speed_R_mm_s_smooth, feats.hind_paw_speed_R_mm_s, feats.hind_paw_speed_R);
+        const distL_mm  = _toMm(feats.hind_to_ear_dist_L_mm, feats.hind_to_ear_dist_L);
+        const distR_mm  = _toMm(feats.hind_to_ear_dist_R_mm, feats.hind_to_ear_dist_R);
 
         valSpeedL.textContent = `${feats.hind_paw_speed_L} px/f (${speedL_mm} mm/s)`;
         valSpeedR.textContent = `${feats.hind_paw_speed_R} px/f (${speedR_mm} mm/s)`;
@@ -233,16 +256,34 @@ document.addEventListener('DOMContentLoaded', () => {
         valOscL.textContent = `${feats.hind_osc_x_L} rev`;
         valOscR.textContent = `${feats.hind_osc_x_R} rev`;
 
-        // Check threshold boundaries
+        // Check threshold boundaries (mm 基準 — バックエンドと同一閾値で判定)
+        const _ratio = SCRATCH_THRESHOLDS.pixelToMmRatio;
+        const _fps   = SCRATCH_THRESHOLDS.fps;
+        // 平滑化速度を優先、なければ非平滑 mm/s、なければ px→mm/s 換算
+        const spdL_smooth_mm = (feats.hind_paw_speed_L_mm_s_smooth != null && !isNaN(feats.hind_paw_speed_L_mm_s_smooth))
+            ? feats.hind_paw_speed_L_mm_s_smooth
+            : (feats.hind_paw_speed_L_mm_s != null && !isNaN(feats.hind_paw_speed_L_mm_s))
+                ? feats.hind_paw_speed_L_mm_s
+                : (feats.hind_paw_speed_L * _ratio * _fps);
+        const spdR_smooth_mm = (feats.hind_paw_speed_R_mm_s_smooth != null && !isNaN(feats.hind_paw_speed_R_mm_s_smooth))
+            ? feats.hind_paw_speed_R_mm_s_smooth
+            : (feats.hind_paw_speed_R_mm_s != null && !isNaN(feats.hind_paw_speed_R_mm_s))
+                ? feats.hind_paw_speed_R_mm_s
+                : (feats.hind_paw_speed_R * _ratio * _fps);
+        const dstL_mm_num = (feats.hind_to_ear_dist_L_mm != null && !isNaN(feats.hind_to_ear_dist_L_mm))
+            ? feats.hind_to_ear_dist_L_mm : (feats.hind_to_ear_dist_L * _ratio);
+        const dstR_mm_num = (feats.hind_to_ear_dist_R_mm != null && !isNaN(feats.hind_to_ear_dist_R_mm))
+            ? feats.hind_to_ear_dist_R_mm : (feats.hind_to_ear_dist_R * _ratio);
+
         // Left
-        if (feats.hind_paw_speed_L > SCRATCH_THRESHOLDS.minVelocity) {
+        if (spdL_smooth_mm > SCRATCH_THRESHOLDS.minVelocityMmS) {
             statSpeedL.className = "threshold-indicator pass";
-            statSpeedL.querySelector('span:last-child').textContent = `✓ ${SCRATCH_THRESHOLDS.minVelocity}px 超過`;
+            statSpeedL.querySelector('span:last-child').textContent = `✓ ${SCRATCH_THRESHOLDS.minVelocityMmS}mm/s 超過`;
         } else {
             statSpeedL.className = "threshold-indicator fail";
             statSpeedL.querySelector('span:last-child').textContent = "✗ 低速";
         }
-        if (feats.hind_to_ear_dist_L < SCRATCH_THRESHOLDS.maxHeadDist) {
+        if (dstL_mm_num < SCRATCH_THRESHOLDS.maxHeadDistMm) {
             statDistL.className = "threshold-indicator pass";
             statDistL.querySelector('span:last-child').textContent = "✓ 接近中";
         } else {
@@ -251,14 +292,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Right
-        if (feats.hind_paw_speed_R > SCRATCH_THRESHOLDS.minVelocity) {
+        if (spdR_smooth_mm > SCRATCH_THRESHOLDS.minVelocityMmS) {
             statSpeedR.className = "threshold-indicator pass";
-            statSpeedR.querySelector('span:last-child').textContent = `✓ ${SCRATCH_THRESHOLDS.minVelocity}px 超過`;
+            statSpeedR.querySelector('span:last-child').textContent = `✓ ${SCRATCH_THRESHOLDS.minVelocityMmS}mm/s 超過`;
         } else {
             statSpeedR.className = "threshold-indicator fail";
             statSpeedR.querySelector('span:last-child').textContent = "✗ 低速";
         }
-        if (feats.hind_to_ear_dist_R < SCRATCH_THRESHOLDS.maxHeadDist) {
+        if (dstR_mm_num < SCRATCH_THRESHOLDS.maxHeadDistMm) {
             statDistR.className = "threshold-indicator pass";
             statDistR.querySelector('span:last-child').textContent = "✓ 接近中";
         } else {
@@ -343,7 +384,14 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     /**
-     * Biomechanic Recalculation Engine matching Python feature_extraction.py
+     * Biomechanic Recalculation Engine — バックエンド feature_extraction.py と同一ロジック (mm 基準)
+     *
+     * 変更点（旧 px 基準からの差分）:
+     *   [1] 速度を mm/s に換算し minVelocityMmS と比較
+     *   [4] velocitySmoothFrames フレームの移動平均平滑化を適用
+     *   [5] 振動数カウントに minOscAmplitudePx の最小振幅フィルタを導入（x・y 両軸）
+     *   [3] scratch_prob を 3 条件マージン比の連続スコア [0,1] で算出
+     *   [1] 耳距離を mm に換算し maxHeadDistMm と比較
      */
     function recalculateFrameKinematics(fIdx, mouseId) {
         const frame = appState.data.frames[fIdx];
@@ -353,6 +401,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const mData = frame.mice[mouseId];
         const kps = mData.keypoints;
 
+        const ratio = SCRATCH_THRESHOLDS.pixelToMmRatio;  // mm/px
+        // FPS: 実動画から取得された値を優先（バックエンドと同じ動作）
+        const fps   = (appState.data && appState.data.fps) || SCRATCH_THRESHOLDS.fps;
+
         const headX = kps["head_center"].x;
         const headY = kps["head_center"].y;
         const earLX = kps["left_ear"].x;
@@ -360,86 +412,106 @@ document.addEventListener('DOMContentLoaded', () => {
         const earRX = kps["right_ear"].x;
         const earRY = kps["right_ear"].y;
 
-        // Recalculate spatial distances
-        mData.features.body_length_px = Math.round(Math.sqrt(Math.pow(kps["neck"].x - kps["tail_base"].x, 2) + Math.pow(kps["neck"].y - kps["tail_base"].y, 2)));
-        mData.features.head_to_nose_dist = Math.round(Math.sqrt(Math.pow(kps["nose"].x - headX, 2) + Math.pow(kps["nose"].y - headY, 2)));
-        
-        mData.features.hind_to_head_dist_L = Math.round(Math.sqrt(Math.pow(kps["left_hind_paw"].x - headX, 2) + Math.pow(kps["left_hind_paw"].y - headY, 2)));
-        mData.features.hind_to_head_dist_R = Math.round(Math.sqrt(Math.pow(kps["right_hind_paw"].x - headX, 2) + Math.pow(kps["right_hind_paw"].y - headY, 2)));
-        mData.features.hind_to_ear_dist_L = Math.round(Math.sqrt(Math.pow(kps["left_hind_paw"].x - earLX, 2) + Math.pow(kps["left_hind_paw"].y - earLY, 2)));
-        mData.features.hind_to_ear_dist_R = Math.round(Math.sqrt(Math.pow(kps["right_hind_paw"].x - earRX, 2) + Math.pow(kps["right_hind_paw"].y - earRY, 2)));
+        // ── A. 距離特徴量 (px) ──────────────────────────────────────────────
+        function dist2d(x1, y1, x2, y2) { return Math.sqrt((x1-x2)**2 + (y1-y2)**2); }
 
-        // Recalculate velocities based on frame displacements
+        mData.features.body_length_px      = Math.round(dist2d(kps["neck"].x, kps["neck"].y, kps["tail_base"].x, kps["tail_base"].y));
+        mData.features.head_to_nose_dist   = Math.round(dist2d(kps["nose"].x, kps["nose"].y, headX, headY));
+        mData.features.hind_to_head_dist_L = Math.round(dist2d(kps["left_hind_paw"].x,  kps["left_hind_paw"].y,  headX, headY));
+        mData.features.hind_to_head_dist_R = Math.round(dist2d(kps["right_hind_paw"].x, kps["right_hind_paw"].y, headX, headY));
+        mData.features.hind_to_ear_dist_L  = Math.round(dist2d(kps["left_hind_paw"].x,  kps["left_hind_paw"].y,  earLX, earLY));
+        mData.features.hind_to_ear_dist_R  = Math.round(dist2d(kps["right_hind_paw"].x, kps["right_hind_paw"].y, earRX, earRY));
+
+        // ── B. mm 単位距離（[1] スクラッチ判定用）──────────────────────────
+        mData.features.hind_to_ear_dist_L_mm = mData.features.hind_to_ear_dist_L * ratio;
+        mData.features.hind_to_ear_dist_R_mm = mData.features.hind_to_ear_dist_R * ratio;
+
+        // ── C. フレーム間速度（px/frame）────────────────────────────────────
         if (prevFrame && prevFrame.mice[mouseId]) {
             const prevKps = prevFrame.mice[mouseId].keypoints;
-            
             const dxL = kps["left_hind_paw"].x - prevKps["left_hind_paw"].x;
             const dyL = kps["left_hind_paw"].y - prevKps["left_hind_paw"].y;
-            mData.features.hind_paw_speed_L = Math.round(Math.sqrt(dxL*dxL + dyL*dyL));
+            mData.features.hind_paw_speed_L       = Math.round(Math.sqrt(dxL*dxL + dyL*dyL));
+            mData.features.hind_paw_speed_L_mm_s  = mData.features.hind_paw_speed_L * ratio * fps;
 
             const dxR = kps["right_hind_paw"].x - prevKps["right_hind_paw"].x;
             const dyR = kps["right_hind_paw"].y - prevKps["right_hind_paw"].y;
-            mData.features.hind_paw_speed_R = Math.round(Math.sqrt(dxR*dxR + dyR*dyR));
+            mData.features.hind_paw_speed_R       = Math.round(Math.sqrt(dxR*dxR + dyR*dyR));
+            mData.features.hind_paw_speed_R_mm_s  = mData.features.hind_paw_speed_R * ratio * fps;
         }
 
-        // M-6: 振動数 (hind_osc_x_L / R) の再計算ロジックを追加 (15フレームのローリング窓でのx軸方向の速度符号反転回数)
-        const windowFrames = 15;
+        // ── D. 速度スムージング（[4] 移動平均 velocitySmoothFrames フレーム）─
+        const smoothN = SCRATCH_THRESHOLDS.velocitySmoothFrames;
+        const velBufL = [], velBufR = [];
+        for (let i = Math.max(1, fIdx - smoothN + 1); i <= fIdx; i++) {
+            const cF = appState.data.frames[i];
+            const pF = appState.data.frames[i - 1];
+            if (cF && pF && cF.mice[mouseId] && pF.mice[mouseId]) {
+                const ck = cF.mice[mouseId].keypoints;
+                const pk = pF.mice[mouseId].keypoints;
+                const dxL = ck["left_hind_paw"].x - pk["left_hind_paw"].x;
+                const dyL = ck["left_hind_paw"].y - pk["left_hind_paw"].y;
+                velBufL.push(Math.sqrt(dxL*dxL + dyL*dyL) * ratio * fps);
+                const dxR = ck["right_hind_paw"].x - pk["right_hind_paw"].x;
+                const dyR = ck["right_hind_paw"].y - pk["right_hind_paw"].y;
+                velBufR.push(Math.sqrt(dxR*dxR + dyR*dyR) * ratio * fps);
+            }
+        }
+        const smoothSpeedL = velBufL.length > 0 ? velBufL.reduce((a, b) => a + b, 0) / velBufL.length : 0;
+        const smoothSpeedR = velBufR.length > 0 ? velBufR.reduce((a, b) => a + b, 0) / velBufR.length : 0;
+        mData.features.hind_paw_speed_L_mm_s_smooth = smoothSpeedL;
+        mData.features.hind_paw_speed_R_mm_s_smooth = smoothSpeedR;
+
+        // ── E. 振動数（[5] 最小振幅フィルタ付き・x/y 両軸）────────────────
+        const windowFrames = SCRATCH_THRESHOLDS.windowFrames;
+        const minAmp = SCRATCH_THRESHOLDS.minOscAmplitudePx;
         const startF = Math.max(1, fIdx - windowFrames + 1);
-        
-        // 左後足の振動数
-        let signChangesL = 0;
-        let lastDxL = 0;
-        for (let i = startF; i <= fIdx; i++) {
-            const currF = appState.data.frames[i];
-            const prevF = appState.data.frames[i - 1];
-            if (currF && prevF && currF.mice[mouseId] && prevF.mice[mouseId]) {
-                const dx = currF.mice[mouseId].keypoints["left_hind_paw"].x - prevF.mice[mouseId].keypoints["left_hind_paw"].x;
-                if (dx !== 0) {
-                    if (lastDxL !== 0 && ((dx > 0 && lastDxL < 0) || (dx < 0 && lastDxL > 0))) {
-                        signChangesL++;
-                    }
-                    lastDxL = dx;
-                }
-            }
-        }
-        mData.features.hind_osc_x_L = signChangesL;
 
-        // 右後足の振動数
-        let signChangesR = 0;
-        let lastDxR = 0;
-        for (let i = startF; i <= fIdx; i++) {
-            const currF = appState.data.frames[i];
-            const prevF = appState.data.frames[i - 1];
-            if (currF && prevF && currF.mice[mouseId] && prevF.mice[mouseId]) {
-                const dx = currF.mice[mouseId].keypoints["right_hind_paw"].x - prevF.mice[mouseId].keypoints["right_hind_paw"].x;
-                if (dx !== 0) {
-                    if (lastDxR !== 0 && ((dx > 0 && lastDxR < 0) || (dx < 0 && lastDxR > 0))) {
-                        signChangesR++;
-                    }
-                    lastDxR = dx;
-                }
+        function countOsc(pawKey, axis) {
+            let count = 0, lastD = 0;
+            for (let i = startF; i <= fIdx; i++) {
+                const cF = appState.data.frames[i];
+                const pF = appState.data.frames[i - 1];
+                if (!cF || !pF || !cF.mice[mouseId] || !pF.mice[mouseId]) continue;
+                const d = cF.mice[mouseId].keypoints[pawKey][axis] - pF.mice[mouseId].keypoints[pawKey][axis];
+                if (Math.abs(d) < minAmp) continue;  // ジッター無視（[5]）
+                if (lastD !== 0 && ((d > 0 && lastD < 0) || (d < 0 && lastD > 0))) count++;
+                lastD = d;
             }
+            return count;
         }
-        mData.features.hind_osc_x_R = signChangesR;
 
-        const L_scratch = (mData.features.hind_paw_speed_L > SCRATCH_THRESHOLDS.minVelocity && 
-                           mData.features.hind_to_ear_dist_L < SCRATCH_THRESHOLDS.maxHeadDist && 
-                           mData.features.hind_osc_x_L >= SCRATCH_THRESHOLDS.minOscillations);
-        const R_scratch = (mData.features.hind_paw_speed_R > SCRATCH_THRESHOLDS.minVelocity && 
-                           mData.features.hind_to_ear_dist_R < SCRATCH_THRESHOLDS.maxHeadDist && 
-                           mData.features.hind_osc_x_R >= SCRATCH_THRESHOLDS.minOscillations);
+        const oscXL = countOsc("left_hind_paw",  "x");
+        const oscYL = countOsc("left_hind_paw",  "y");
+        const oscXR = countOsc("right_hind_paw", "x");
+        const oscYR = countOsc("right_hind_paw", "y");
+        const oscL  = Math.max(oscXL, oscYL);  // バックエンドと同様 max(x, y)
+        const oscR  = Math.max(oscXR, oscYR);
 
-        if (L_scratch || R_scratch) {
-            mData.scratch_flag = 1;
-            mData.scratch_prob = 0.95;
-        } else {
-            // Maintain user loaded/original flags if not explicitly cleared by rules
-            // Let's allow clearing if speeds drop significantly
-            if (mData.features.hind_to_ear_dist_L > 165 && mData.features.hind_to_ear_dist_R > 165) {
-                mData.scratch_flag = 0;
-                mData.scratch_prob = 0.05;
-            }
+        mData.features.hind_osc_x_L = oscXL;
+        mData.features.hind_osc_y_L = oscYL;
+        mData.features.hind_osc_x_R = oscXR;
+        mData.features.hind_osc_y_R = oscYR;
+
+        // ── F. スクラッチ判定（[1][3] mm 基準・連続スコア）─────────────────
+        // バックエンドの _compute_scratch_prob() と同一ロジック
+        function computeScratchProb(speedMmS, distMm, osc) {
+            const vT = SCRATCH_THRESHOLDS.minVelocityMmS;
+            const dT = SCRATCH_THRESHOLDS.maxHeadDistMm;
+            const oT = SCRATCH_THRESHOLDS.minOscillations;
+            if (speedMmS <= vT || distMm >= dT || osc < oT) return 0.0;
+            const sSpeed = Math.min(1.0, (speedMmS - vT) / vT);
+            const sDist  = Math.min(1.0, (dT - distMm) / dT);
+            const sOsc   = Math.min(1.0, (osc - oT) / Math.max(oT, 1));
+            return Math.min(1.0, (sSpeed + sDist + sOsc) / 3.0);
         }
+
+        const probL = computeScratchProb(smoothSpeedL, mData.features.hind_to_ear_dist_L_mm, oscL);
+        const probR = computeScratchProb(smoothSpeedR, mData.features.hind_to_ear_dist_R_mm, oscR);
+        const prob  = Math.max(probL, probR);
+
+        mData.scratch_flag = prob > 0 ? 1 : 0;
+        mData.scratch_prob = prob;
     }
 
     // --- 7. Individual ID Swapper (混同修正機能) ---
@@ -500,15 +572,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function exportCorrectedCSV() {
-        const headers = ["frame_idx", "track", "mouse_id", "scratch_flag", "scratch_prob"];
-        
-        // Add keypoint columns
+        // バックエンドの *_frame_labels.csv 出力スキーマと一致させる
+        // （evaluate.py に直接流せる形式 + 学術論文用の mm 物理単位特徴量を含む）
+        const headers = ["frame_idx", "track", "mouse_id", "is_scratch", "scratch_flag", "scratch_prob"];
+
+        // Add keypoint columns (x, y) — conf は手動補正後は 1.0 とみなす
         KEYPOINTS_LIST.forEach(kp => {
-            headers.push(`${kp}_x`, `${kp}_y`);
+            headers.push(`${kp}_x`, `${kp}_y`, `${kp}_conf`);
         });
 
-        // Add feature columns
-        const featKeys = [
+        // px 系特徴量
+        const featKeysPx = [
             "body_length_px", "head_to_nose_dist",
             "hind_to_head_dist_L", "hind_to_head_dist_R",
             "hind_to_ear_dist_L", "hind_to_ear_dist_R",
@@ -516,35 +590,54 @@ document.addEventListener('DOMContentLoaded', () => {
             "hind_osc_x_L", "hind_osc_y_L",
             "hind_osc_x_R", "hind_osc_y_R"
         ];
-        featKeys.forEach(fk => headers.push(fk));
+        // mm 系特徴量（バックエンドの再評価互換のため必須）
+        const featKeysMm = [
+            "body_length_mm", "head_to_nose_dist_mm",
+            "hind_to_head_dist_L_mm", "hind_to_head_dist_R_mm",
+            "hind_to_ear_dist_L_mm", "hind_to_ear_dist_R_mm",
+            "hind_paw_speed_L_mm_s", "hind_paw_speed_R_mm_s",
+            "hind_paw_speed_L_mm_s_smooth", "hind_paw_speed_R_mm_s_smooth"
+        ];
+        featKeysPx.forEach(fk => headers.push(fk));
+        featKeysMm.forEach(fk => headers.push(fk));
 
         const rows = [headers.join(",")];
 
+        // 数値フォーマット（mm 単位は小数 3 桁、px は整数）
+        const fmt = (v, decimals) => {
+            if (v === undefined || v === null || (typeof v === "number" && isNaN(v))) return "";
+            return decimals != null ? Number(v).toFixed(decimals) : v;
+        };
+
         for (let f = 0; f < appState.data.numFrames; f++) {
             const frame = appState.data.frames[f];
-            
+
             for (let mId = 1; mId <= 4; mId++) {
                 const mData = frame.mice[mId];
                 if (!mData) continue;
 
+                const flag = mData.scratch_flag | 0;
                 const cols = [
                     f,
                     `mouse_${mId}`,
                     mId,
-                    mData.scratch_flag,
-                    mData.scratch_prob.toFixed(3)
+                    flag,                          // is_scratch (evaluate.py 互換)
+                    flag,                          // scratch_flag (パイプライン互換)
+                    fmt(mData.scratch_prob, 3)
                 ];
 
                 // Coordinates
                 KEYPOINTS_LIST.forEach(kp => {
                     const node = mData.keypoints[kp];
-                    cols.push(node ? node.x : "", node ? node.y : "");
+                    cols.push(node ? fmt(node.x) : "",
+                              node ? fmt(node.y) : "",
+                              node && node.conf != null ? fmt(node.conf, 3) : "1.000");
                 });
 
-                // Features
-                featKeys.forEach(fk => {
-                    cols.push(mData.features[fk] !== undefined ? mData.features[fk] : "");
-                });
+                // px 特徴量
+                featKeysPx.forEach(fk => cols.push(fmt(mData.features[fk])));
+                // mm 特徴量
+                featKeysMm.forEach(fk => cols.push(fmt(mData.features[fk], 3)));
 
                 rows.push(cols.join(","));
             }
@@ -701,7 +794,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const errMessages = {
                 1: 'ユーザーによる再生中断',
                 2: 'ネットワークエラー',
-                3: 'デコードエラー: ファイルが堤損しているか、コーデック非対応',
+                3: 'デコードエラー: ファイルが破損しているか、コーデック非対応',
                 4: 'ファイルが見つからないか、ファイル形式非対応'
             };
             const errMsg = errMessages[errCode] || '不明なエラー';
@@ -709,7 +802,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('[Video] 再生エラー:', errCode, errMsg, file.name);
             
             if (fileExt === '.mov' || file.type === 'video/quicktime') {
-                alert(`⚠️ MOVファイルの再生に失敗しました。\nエラー: ${errMsg}\n\nMOVファイルはブラウザによってコーデック互换性が異なります。\n\n解決策:\n1. ブラウザを Safari または Edge に変更する\n2. FFmpeg で .mp4 に変換: ffmpeg -i input.mov output.mp4`);
+                alert(`⚠️ MOVファイルの再生に失敗しました。\nエラー: ${errMsg}\n\nMOVファイルはブラウザによってコーデック互換性が異なります。\n\n解決策:\n1. ブラウザを Safari または Edge に変更する\n2. FFmpeg で .mp4 に変換: ffmpeg -i input.mov output.mp4`);
             } else {
                 alert(`⚠️ 動画の読み込みに失敗しました。\nエラー: ${errMsg}\nファイル: ${file.name}`);
             }
@@ -1046,9 +1139,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function autoGenerateBoutsFromFlags() {
+        // バックエンド feature_extraction.py の Bout 検出と同じ閾値を使用
+        const MIN_FRAMES = SCRATCH_THRESHOLDS.boutMinFrames;
+        const MERGE_GAP  = SCRATCH_THRESHOLDS.boutMergeGap;
         const bouts = [];
         const frames = appState.data.frames;
-        
+
         for (let mId = 1; mId <= 4; mId++) {
             let inBout = false;
             let startFrame = 0;
@@ -1061,8 +1157,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     inBout = true;
                     startFrame = f;
                 } else if (!isScratching && inBout) {
+                    // 直近 MERGE_GAP フレーム内に scratch_flag=1 が再出現すれば結合
                     let merge = false;
-                    for (let peek = f; peek < Math.min(f + 10, frames.length); peek++) {
+                    for (let peek = f; peek < Math.min(f + MERGE_GAP, frames.length); peek++) {
                         if (frames[peek].mice[mId]?.scratch_flag === 1) {
                             merge = true;
                             f = peek - 1;
@@ -1072,7 +1169,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     if (!merge) {
                         const durationFrames = f - startFrame;
-                        if (durationFrames >= 5) {
+                        if (durationFrames >= MIN_FRAMES) {
                             bouts.push({
                                 mouse_id: mId,
                                 bout_id: boutIdx++,
@@ -1089,7 +1186,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            if (inBout && (frames.length - startFrame >= 5)) {
+            if (inBout && (frames.length - startFrame >= MIN_FRAMES)) {
                 bouts.push({
                     mouse_id: mId,
                     bout_id: boutIdx++,
