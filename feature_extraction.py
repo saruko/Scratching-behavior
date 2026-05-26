@@ -46,7 +46,7 @@ from config import (
     SCRATCH_MIN_VELOCITY_MM_S,       # [1] mm/s
     SCRATCH_MAX_HEAD_DIST_MM,        # [1] mm
     SCRATCH_MIN_OSCILLATIONS,
-    SCRATCH_MIN_OSC_AMPLITUDE_PX,    # [5] px
+    SCRATCH_MIN_OSC_AMPLITUDE_MM,    # [5] mm (キャリブレーション独立)
     SCRATCH_VELOCITY_SMOOTH_FRAMES,  # [4] frames
     BOUT_MIN_FRAMES,
     BOUT_MERGE_GAP,
@@ -409,15 +409,20 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
             speed_R_smooth = float(np.mean(list(vel_R_buf))) if vel_R_buf else np.nan
 
             # ── E. [5] 振動数（最小振幅閾値付き）───────────────────────────
+            # NOTE: SCRATCH_MIN_OSC_AMPLITUDE_MM (mm) を、現在のキャリブレーションで
+            # px 換算してから _count_oscillations に渡す。これにより、カメラ設置高さや
+            # 拡大率が異なる実験間でも、生物学的に等価な振幅閾値が適用される。
+            _min_amp_px = SCRATCH_MIN_OSC_AMPLITUDE_MM / pixel_to_mm_ratio if pixel_to_mm_ratio > 0 else 3.0
+
             x_hist_L.append(hind_l_x);  y_hist_L.append(hind_l_y)
             x_hist_R.append(hind_r_x);  y_hist_R.append(hind_r_y)
             if len(x_hist_L) > SCRATCH_WINDOW_FRAMES: x_hist_L.pop(0); y_hist_L.pop(0)
             if len(x_hist_R) > SCRATCH_WINDOW_FRAMES: x_hist_R.pop(0); y_hist_R.pop(0)
 
-            osc_x_L = _count_oscillations(x_hist_L, SCRATCH_MIN_OSC_AMPLITUDE_PX)
-            osc_y_L = _count_oscillations(y_hist_L, SCRATCH_MIN_OSC_AMPLITUDE_PX)
-            osc_x_R = _count_oscillations(x_hist_R, SCRATCH_MIN_OSC_AMPLITUDE_PX)
-            osc_y_R = _count_oscillations(y_hist_R, SCRATCH_MIN_OSC_AMPLITUDE_PX)
+            osc_x_L = _count_oscillations(x_hist_L, _min_amp_px)
+            osc_y_L = _count_oscillations(y_hist_L, _min_amp_px)
+            osc_x_R = _count_oscillations(x_hist_R, _min_amp_px)
+            osc_y_R = _count_oscillations(y_hist_R, _min_amp_px)
             osc_L   = max(osc_x_L, osc_y_L)
             osc_R   = max(osc_x_R, osc_y_R)
 
@@ -459,12 +464,24 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
             prev_body_len_px = body_length_px if not np.isnan(body_length_px) else prev_body_len_px
 
             # ── F. [1][3] スクラッチ判定（mm 単位・連続スコア） ─────────────
+            # マウスの掻き動作は耳だけでなく頭部全体（顔・首）に向かうため、
+            # ear と head_center の両方からの最近接距離を判定に使用する。
+            # min(ear, head_center) を採ることで、顔面掻き行動も漏れなく検出する。
+            def _safe_min(a, b):
+                if np.isnan(a) and np.isnan(b): return np.nan
+                if np.isnan(a): return b
+                if np.isnan(b): return a
+                return min(a, b)
+
+            head_dist_L_mm = _safe_min(hind_to_ear_L_mm, hind_to_head_L_mm)
+            head_dist_R_mm = _safe_min(hind_to_ear_R_mm, hind_to_head_R_mm)
+
             prob_L = _compute_scratch_prob(
-                speed_L_smooth, hind_to_ear_L_mm, osc_L,
+                speed_L_smooth, head_dist_L_mm, osc_L,
                 SCRATCH_MIN_VELOCITY_MM_S, SCRATCH_MAX_HEAD_DIST_MM, SCRATCH_MIN_OSCILLATIONS
             )
             prob_R = _compute_scratch_prob(
-                speed_R_smooth, hind_to_ear_R_mm, osc_R,
+                speed_R_smooth, head_dist_R_mm, osc_R,
                 SCRATCH_MIN_VELOCITY_MM_S, SCRATCH_MAX_HEAD_DIST_MM, SCRATCH_MIN_OSCILLATIONS
             )
             scratch_prob = float(max(prob_L, prob_R))

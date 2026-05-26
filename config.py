@@ -79,29 +79,66 @@ HIND_PAW_MIN_CONF       = _get_env("HIND_PAW_MIN_CONF", 0.35)  # hind paws can b
 INTERPOLATION_MAX_GAP   = _get_env("INTERPOLATION_MAX_GAP", 5)     # frames: interpolate gaps shorter than this
 
 # ── Scratch-detection thresholds (PHYSICAL UNITS — cross-study reproducible) ─
-SCRATCH_WINDOW_FRAMES    = _get_env("SCRATCH_WINDOW_FRAMES", 15)     # frames — oscillation analysis window
+# 文献根拠:
+#  - Kuraishi et al. (1995) Eur J Pharmacol 275:229: マウスのscratchは ~10-15 Hz の振動
+#  - Akiyama et al. (2010) J Invest Dermatol 130:2474: scratch bout の典型継続時間 0.3-3 秒
+#  - Inagaki et al. (2002) Eur J Pharmacol 437:175: 後肢ピーク速度は数百 mm/s 級
+#
+# SCRATCH_WINDOW_FRAMES: 振動カウント窓。30 frames = 1秒。Default 30 で  10 Hz scratch を確実に捕捉。
+# （以前の 15 frames = 0.5 秒では振動が確実に捕捉されない場合があった）
+SCRATCH_WINDOW_FRAMES    = _get_env("SCRATCH_WINDOW_FRAMES", 30)     # frames — oscillation analysis window
 
-# mm/s threshold for minimum hind-paw speed (≈ 150 mm/s is conservative for active scratch)
+# 最小後肢速度（スムージング後）。Documented scratch peak velocities 200-500 mm/s だが、
+# 5 フレーム移動平均後の値なので 150 mm/s が現実的下限。
 SCRATCH_MIN_VELOCITY_MM_S    = _get_env("SCRATCH_MIN_VELOCITY_MM_S",  150.0)
-# mm threshold for maximum hind-paw to ear distance during head-directed scratch
-SCRATCH_MAX_HEAD_DIST_MM     = _get_env("SCRATCH_MAX_HEAD_DIST_MM",    50.0)
-SCRATCH_MIN_OSCILLATIONS     = _get_env("SCRATCH_MIN_OSCILLATIONS",        3)  # direction reversals / window
 
-# Oscillation quality: ignore pose-estimation jitter smaller than this displacement
-SCRATCH_MIN_OSC_AMPLITUDE_PX = _get_env("SCRATCH_MIN_OSC_AMPLITUDE_PX",   3.0)  # px
-# Velocity smoothing: rolling-mean window to suppress single-frame outliers
-SCRATCH_VELOCITY_SMOOTH_FRAMES = _get_env("SCRATCH_VELOCITY_SMOOTH_FRAMES",   5)  # frames
+# 後肢→頭部最近接距離 (mm)。体長 80-110 mm の ~半分。
+# 注: feature_extraction では min(hind_to_ear, hind_to_head_center) を用いる。
+SCRATCH_MAX_HEAD_DIST_MM     = _get_env("SCRATCH_MAX_HEAD_DIST_MM",    50.0)
+
+# 最低振動回数 / SCRATCH_WINDOW_FRAMES 窓。
+# SCRATCH_WINDOW_FRAMES=30 (1秒) で 10 振動 = 10 Hz 相当。
+# 文献の 10-15 Hz 範囲の下限に対応。
+SCRATCH_MIN_OSCILLATIONS     = _get_env("SCRATCH_MIN_OSCILLATIONS",       10)
+
+# 振動カウントの最小振幅 (mm)。0.75 mm 未満の変位はジッターとみなす。
+# 旧 SCRATCH_MIN_OSC_AMPLITUDE_PX (= 3.0 px @ 0.25 mm/px = 0.75 mm) を mm 単位に変換。
+# mm 単位にすることで、px-to-mm キャリブレーションが変わっても閾値の生物学的意味が保持される。
+SCRATCH_MIN_OSC_AMPLITUDE_MM = _get_env("SCRATCH_MIN_OSC_AMPLITUDE_MM", 0.75)
+
+# 後方互換: 旧 PX 名でも環境変数指定可能（mm に変換して使用）。
+# 明示的に PX 値が指定された場合は PIXEL_TO_MM_RATIO で mm に変換して上書きする。
+_OSC_AMP_PX_OVERRIDE = os.environ.get("SCRATCH_MIN_OSC_AMPLITUDE_PX")
+SCRATCH_MIN_OSC_AMPLITUDE_PX = _get_env("SCRATCH_MIN_OSC_AMPLITUDE_PX",   3.0)  # px (legacy)
+
+# 速度スムージング窓 (フレーム)。
+SCRATCH_VELOCITY_SMOOTH_FRAMES = _get_env("SCRATCH_VELOCITY_SMOOTH_FRAMES",   5)
 
 # DEPRECATED (pixel-based) — retained only for /api/config backward-compatibility
 SCRATCH_MIN_VELOCITY  = _get_env("SCRATCH_MIN_VELOCITY",  30)   # px/frame
 SCRATCH_MAX_HEAD_DIST = _get_env("SCRATCH_MAX_HEAD_DIST", 150)  # px
 
 # ── Bout post-processing ──────────────────────────────────────────────────────
-BOUT_MIN_FRAMES   = _get_env("BOUT_MIN_FRAMES", 5)   # discard bouts shorter than this
-BOUT_MERGE_GAP    = _get_env("BOUT_MERGE_GAP", 10)  # merge adjacent bouts separated by ≤ this many frames
+# BOUT_MIN_FRAMES: 最短 bout 継続フレーム数。
+# 10 frames @ 30fps = 0.33 秒 — Akiyama et al. (2010) の典型 bout 下限に合致。
+# 以前の 5 frames (0.17 秒) は単発の偽陽性を多く含む可能性があった。
+BOUT_MIN_FRAMES   = _get_env("BOUT_MIN_FRAMES", 10)
+# BOUT_MERGE_GAP: 隣接 bout を連結する最大ギャップ。
+# 10 frames @ 30fps = 0.33 秒。これより短いギャップは「同一掻き行動の継続」とみなす。
+BOUT_MERGE_GAP    = _get_env("BOUT_MERGE_GAP", 10)
 
 # ── Camera / video defaults ───────────────────────────────────────────────────
 PIXEL_TO_MM_RATIO  = _get_env("PIXEL_TO_MM_RATIO", 0.25)  # mm/pixel: 1px = 0.25mm
+
+# 旧 SCRATCH_MIN_OSC_AMPLITUDE_PX を明示的に指定した場合、現在の PIXEL_TO_MM_RATIO で
+# mm に変換して上書きする（後方互換）。
+if _OSC_AMP_PX_OVERRIDE is not None:
+    try:
+        SCRATCH_MIN_OSC_AMPLITUDE_MM = float(_OSC_AMP_PX_OVERRIDE) * PIXEL_TO_MM_RATIO
+        print(f"[config] [Info] SCRATCH_MIN_OSC_AMPLITUDE_PX={_OSC_AMP_PX_OVERRIDE} → "
+              f"mm 換算 {SCRATCH_MIN_OSC_AMPLITUDE_MM:.3f} mm (PIXEL_TO_MM_RATIO={PIXEL_TO_MM_RATIO})")
+    except (TypeError, ValueError):
+        pass
 DEFAULT_FPS        = _get_env("DEFAULT_FPS", 30)
 # CAGE_MICE_COUNT: 0 = 動画から自動検出、1以上 = 固定頭数。デフォルト 0 (自動)
 CAGE_MICE_COUNT    = _get_env("CAGE_MICE_COUNT", 0)

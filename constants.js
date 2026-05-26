@@ -20,19 +20,21 @@ const KEYPOINTS_LIST = [
 // 実行時に /api/config から上書きされる（app.js）。
 const SCRATCH_THRESHOLDS = {
     // ── 物理単位 (mm) — バックエンドの判定と同一基準 ──
+    // 文献値に基づく: Kuraishi 1995 (~10-15 Hz), Akiyama 2010 (bout 0.3-3秒)
     minVelocityMmS: 150.0,      // SCRATCH_MIN_VELOCITY_MM_S
     maxHeadDistMm: 50.0,        // SCRATCH_MAX_HEAD_DIST_MM
-    minOscillations: 3,         // SCRATCH_MIN_OSCILLATIONS
-    minOscAmplitudePx: 3.0,     // SCRATCH_MIN_OSC_AMPLITUDE_PX
+    minOscillations: 10,        // SCRATCH_MIN_OSCILLATIONS — 30フレーム窓で10振動 = 10Hz相当
+    minOscAmplitudeMm: 0.75,    // SCRATCH_MIN_OSC_AMPLITUDE_MM — キャリブレーション独立
     velocitySmoothFrames: 5,    // SCRATCH_VELOCITY_SMOOTH_FRAMES
-    windowFrames: 15,           // SCRATCH_WINDOW_FRAMES
+    windowFrames: 30,           // SCRATCH_WINDOW_FRAMES — 30フレーム = 1秒（10Hz検出に十分）
     pixelToMmRatio: 0.25,       // PIXEL_TO_MM_RATIO
     fps: 30,                    // DEFAULT_FPS
     interpolationMaxGap: 5,     // INTERPOLATION_MAX_GAP — 線形補間の最大ギャップ
     // ── Bout 後処理（フロント側手動補正後の bout 再構築用、バックエンドと同値）──
-    boutMinFrames: 5,           // BOUT_MIN_FRAMES — Bout として認める最小フレーム数
+    boutMinFrames: 10,          // BOUT_MIN_FRAMES — 0.33秒 (Akiyama 2010)
     boutMergeGap:  10,          // BOUT_MERGE_GAP  — 隣接 Bout を結合する最大ギャップ
     // ── 後方互換 (px) — 旧表示用フォールバックのみ ──
+    minOscAmplitudePx: 3.0,     // 旧 PX 名（参考値）
     minVelocity: 30,
     maxHeadDist: 150
 };

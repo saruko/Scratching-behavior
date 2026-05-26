@@ -89,6 +89,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cfg.SCRATCH_MIN_VELOCITY_MM_S      != null) SCRATCH_THRESHOLDS.minVelocityMmS       = cfg.SCRATCH_MIN_VELOCITY_MM_S;
         if (cfg.SCRATCH_MAX_HEAD_DIST_MM       != null) SCRATCH_THRESHOLDS.maxHeadDistMm        = cfg.SCRATCH_MAX_HEAD_DIST_MM;
         if (cfg.SCRATCH_MIN_OSCILLATIONS       != null) SCRATCH_THRESHOLDS.minOscillations      = cfg.SCRATCH_MIN_OSCILLATIONS;
+        // 新規 (mm単位、推奨): キャリブレーション独立の振幅閾値
+        if (cfg.SCRATCH_MIN_OSC_AMPLITUDE_MM   != null) SCRATCH_THRESHOLDS.minOscAmplitudeMm    = cfg.SCRATCH_MIN_OSC_AMPLITUDE_MM;
+        // 旧 (px単位、後方互換)
         if (cfg.SCRATCH_MIN_OSC_AMPLITUDE_PX   != null) SCRATCH_THRESHOLDS.minOscAmplitudePx    = cfg.SCRATCH_MIN_OSC_AMPLITUDE_PX;
         if (cfg.SCRATCH_VELOCITY_SMOOTH_FRAMES != null) SCRATCH_THRESHOLDS.velocitySmoothFrames = cfg.SCRATCH_VELOCITY_SMOOTH_FRAMES;
         if (cfg.SCRATCH_WINDOW_FRAMES          != null) SCRATCH_THRESHOLDS.windowFrames         = cfg.SCRATCH_WINDOW_FRAMES;
@@ -500,8 +503,11 @@ document.addEventListener('DOMContentLoaded', () => {
         mData.features.hind_to_ear_dist_R  = Math.round(dist2d(kps["right_hind_paw"].x, kps["right_hind_paw"].y, earRX, earRY));
 
         // ── B. mm 単位距離（[1] スクラッチ判定用）──────────────────────────
-        mData.features.hind_to_ear_dist_L_mm = mData.features.hind_to_ear_dist_L * ratio;
-        mData.features.hind_to_ear_dist_R_mm = mData.features.hind_to_ear_dist_R * ratio;
+        mData.features.hind_to_ear_dist_L_mm  = mData.features.hind_to_ear_dist_L  * ratio;
+        mData.features.hind_to_ear_dist_R_mm  = mData.features.hind_to_ear_dist_R  * ratio;
+        // 顔面・頭頂掻きも検出するため head_center 距離も mm 化
+        mData.features.hind_to_head_dist_L_mm = mData.features.hind_to_head_dist_L * ratio;
+        mData.features.hind_to_head_dist_R_mm = mData.features.hind_to_head_dist_R * ratio;
 
         // ── C. フレーム間速度（px/frame）────────────────────────────────────
         if (prevFrame && prevFrame.mice[mouseId]) {
@@ -540,8 +546,13 @@ document.addEventListener('DOMContentLoaded', () => {
         mData.features.hind_paw_speed_R_mm_s_smooth = smoothSpeedR;
 
         // ── E. 振動数（[5] 最小振幅フィルタ付き・x/y 両軸）────────────────
+        // バックエンドと同期: 振幅閾値は mm 単位で保持し、px に換算してから比較する。
+        // これによりキャリブレーション値が変わっても生物学的に等価な閾値が適用される。
         const windowFrames = SCRATCH_THRESHOLDS.windowFrames;
-        const minAmp = SCRATCH_THRESHOLDS.minOscAmplitudePx;
+        const _ratioForAmp = ratio > 0 ? ratio : 0.25;
+        const minAmp = (SCRATCH_THRESHOLDS.minOscAmplitudeMm != null)
+            ? SCRATCH_THRESHOLDS.minOscAmplitudeMm / _ratioForAmp
+            : SCRATCH_THRESHOLDS.minOscAmplitudePx;
         const startF = Math.max(1, fIdx - windowFrames + 1);
 
         function countOsc(pawKey, axis) {
@@ -583,8 +594,19 @@ document.addEventListener('DOMContentLoaded', () => {
             return Math.min(1.0, (sSpeed + sDist + sOsc) / 3.0);
         }
 
-        const probL = computeScratchProb(smoothSpeedL, mData.features.hind_to_ear_dist_L_mm, oscL);
-        const probR = computeScratchProb(smoothSpeedR, mData.features.hind_to_ear_dist_R_mm, oscR);
+        // バックエンドと同期: ear と head_center の両方からの最近接距離を採用。
+        // マウスは耳・顔・首など頭部全体を掻くため、min(ear, head) が掻き行動の指標として
+        // より生物学的に正確。
+        function _safeMin(a, b) {
+            if (a == null || isNaN(a)) return b;
+            if (b == null || isNaN(b)) return a;
+            return Math.min(a, b);
+        }
+        const headDistLmm = _safeMin(mData.features.hind_to_ear_dist_L_mm, mData.features.hind_to_head_dist_L_mm);
+        const headDistRmm = _safeMin(mData.features.hind_to_ear_dist_R_mm, mData.features.hind_to_head_dist_R_mm);
+
+        const probL = computeScratchProb(smoothSpeedL, headDistLmm, oscL);
+        const probR = computeScratchProb(smoothSpeedR, headDistRmm, oscR);
         const prob  = Math.max(probL, probR);
 
         mData.scratch_flag = prob > 0 ? 1 : 0;

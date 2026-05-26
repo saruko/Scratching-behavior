@@ -181,16 +181,20 @@ def build_preview_json(
     BBOX_PAD = 20  # バウンディングボックスのパディング (px)
 
     # 動画の実解像度を取得（フロントエンドでの座標変換に使用）
+    # NOTE: 正しい OpenCV プロパティ名は CAP_PROP_FRAME_WIDTH/HEIGHT。
+    # CAP_PROP_WIDTH / CAP_PROP_HEIGHT は存在しないため AttributeError → 1920x1080 へ fallback していた。
     video_w, video_h = 1920, 1080
     try:
         import cv2 as _cv2
         cap = _cv2.VideoCapture(video_path)
         if cap.isOpened():
-            video_w = int(cap.get(_cv2.CAP_PROP_WIDTH))
-            video_h = int(cap.get(_cv2.CAP_PROP_HEIGHT))
+            w = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+            if w > 0 and h > 0:
+                video_w, video_h = w, h
             cap.release()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[pipeline] [Warning] 動画解像度取得失敗 → フォールバック {video_w}x{video_h}: {e}")
 
     max_frame = int(preview_duration_s * fps)
     step = max(1, int(sample_interval_s * fps))
