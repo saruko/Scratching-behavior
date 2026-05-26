@@ -71,6 +71,7 @@ BOUT_MIN_FRAMES   = _get_env("BOUT_MIN_FRAMES", 5)   # discard bouts shorter tha
 BOUT_MERGE_GAP    = _get_env("BOUT_MERGE_GAP", 10)  # merge adjacent bouts separated by ≤ this many frames
 
 # ── Camera / video defaults ───────────────────────────────────────────────────
+PIXEL_TO_MM_RATIO  = _get_env("PIXEL_TO_MM_RATIO", 0.25)  # mm/pixel: 1px = 0.25mm
 DEFAULT_FPS        = _get_env("DEFAULT_FPS", 30)
 CAGE_MICE_COUNT    = _get_env("CAGE_MICE_COUNT", 4)
 

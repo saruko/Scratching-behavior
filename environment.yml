@@ -1,0 +1,52 @@
+# Mouse Scratch Detection System — Anaconda 環境定義 (ローカル GPU 対応)
+# =============================================================================
+# 使用方法:
+#   conda env create -f environment.yml
+#   conda activate mouse-scratch
+#
+# CUDA バージョンの確認:
+#   nvidia-smi  →  右上の "CUDA Version" を確認
+#   対応バージョン: pytorch-cuda=11.8 (RTX 30xx以前) / 12.1 (RTX 40xx)
+#
+# SLEAP を使用したい場合 (別環境として推奨):
+#   conda create -y -n sleap -c sleap -c nvidia -c conda-forge sleap
+#   conda activate sleap && sleap-track --help
+# =============================================================================
+
+name: mouse-scratch
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # 科学計算コアライブラリ
+  - numpy>=1.23,<2
+  - pandas>=2.0
+  - h5py>=3.9
+
+  # PyTorch + CUDA (Nvidia GPU サポート)
+  # ※ CUDA 12.1 が標準。RTX 3060以前などの場合は pytorch-cuda=11.8 に変更してください
+  - pytorch::pytorch>=2.1
+  - pytorch::torchvision>=0.16
+  - pytorch::pytorch-cuda=12.1
+
+  - pip:
+    # Web サーバー & API
+    - fastapi>=0.111.0
+    - uvicorn[standard]>=0.29.0
+    - pydantic>=2.7.0
+
+    # 画像処理 (headless版: GUI不要)
+    - opencv-python-headless>=4.9.0
+
+    # YOLOv8 姿勢推定エンジン (GPU自動利用)
+    - ultralytics>=8.2.0
+
+    # HTTP クライアント (ヘルスチェック用)
+    - httpx>=0.27.0

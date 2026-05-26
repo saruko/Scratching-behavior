@@ -14,6 +14,7 @@ Strategy
    track that has the higher vote count winning.
 """
 
+import os
 import cv2
 import numpy as np
 import pandas as pd
@@ -117,7 +118,12 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame) -> pd.DataFrame:
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise FileNotFoundError(f"動画ファイルを開けませんでした: {video_path}")
+        video_ext = os.path.splitext(video_path)[1].lower()
+        hint = ""
+        if video_ext == '.mov':
+            hint = (" MOVファイルの場合、OpenCVがH.264コーデックに対応している必要があります。"
+                   " ffmpeg -i input.mov -c:v libx264 output.mp4 で変換できます。")
+        raise FileNotFoundError(f"動画ファイルを開けませんでした: {video_path}{hint}")
 
     # C-3: 動画フレーム数と DataFrame の整合性確認
     max_frame = pose_df["frame_idx"].max() if not pose_df.empty else 0
@@ -225,13 +231,8 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame) -> pd.DataFrame:
     # 最終的な DataFrame の更新
     pose_df = pose_df.copy()
     
-    # 1. 各行の 'track' を分割後の 'subtrack_id' に更新
-    new_tracks = []
-    for _, row in pose_df.iterrows():
-        f = row["frame_idx"]
-        orig_t = row["track"]
-        new_tracks.append(frame_subtrack_map.get((f, orig_t), orig_t))
-    pose_df["track"] = new_tracks
+    # 1. 各行の 'track' を分割後の 'subtrack_id' に更新 (B-6: zip内包表記による高速化)
+    pose_df["track"] = [frame_subtrack_map.get((f, t), t) for f, t in zip(pose_df["frame_idx"], pose_df["track"])]
 
     # 2. 基本的な 'mouse_id' カラムの作成・マッピング
     pose_df["mouse_id"] = pose_df["track"].map(lambda t: subtrack_to_color.get(t, None))

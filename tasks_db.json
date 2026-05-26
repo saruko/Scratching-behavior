@@ -1,0 +1,8 @@
+{
+  "58fdace0-d8fe-4fdc-8281-20834c37079c": {
+    "status": "failed",
+    "video": "test_swap.mp4",
+    "log": "[Server] 解析プロセスを開始します...\n[Server] コマンド: python3 pipeline.py --video test_swap.mp4 --engine mock --px-to-mm 0.25\n\n[Progress: 5%]\nPython \n[Server] [Error] プロセスがエラー終了しました (Exit Code: 9009)",
+    "warning": ""
+  }
+}

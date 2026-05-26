@@ -1,8 +1,9 @@
 /*
- * Mouse Scratch Detection System - Main Dashboard Stylesheet (拡張版)
+ * Mouse Scratch Detection System - Main Dashboard Stylesheet (拡張版 v2)
  * ==================================================================
- * Design System: Modern Glassmorphic Dark Mode, Overlay Layouts,
- * Highlighting styles for Drag & Drop keypoint correction, and interactive widgets.
+ * Design System: Modern Glassmorphic Dark Mode, Dual Video Panel Layout,
+ * Progress Bars, Enhanced Manual Correction UI, Overlay Layouts,
+ * Highlighting styles for Drag & Drop keypoint correction.
  */
 
 
@@ -157,6 +158,7 @@ h1, h2, h3, h4, .font-outfit {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-shrink: 0;
 }
 
 .panel-title {
@@ -182,6 +184,7 @@ h1, h2, h3, h4, .font-outfit {
     flex-direction: column;
     gap: 15px;
     height: 100%;
+    overflow-y: auto;
 }
 
 .upload-box {
@@ -216,6 +219,40 @@ h1, h2, h3, h4, .font-outfit {
     font-size: 0.7rem;
     color: var(--text-muted);
     margin-top: 4px;
+}
+
+/* --- Progress Bars --- */
+.progress-bar-container {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.progress-bar-fill {
+    height: 100%;
+    border-radius: 10px;
+    transition: width 0.25s ease-out;
+    position: relative;
+    overflow: hidden;
+}
+
+.progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 60%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+    animation: progress-shimmer 1.5s infinite;
+}
+
+@keyframes progress-shimmer {
+    0%   { left: -60%; }
+    100% { left: 160%; }
 }
 
 /* Mouse Selector buttons */
@@ -260,6 +297,7 @@ h1, h2, h3, h4, .font-outfit {
     height: 10px;
     border-radius: 50%;
     box-shadow: 0 0 6px currentColor;
+    flex-shrink: 0;
 }
 
 .mouse-label {
@@ -277,70 +315,93 @@ h1, h2, h3, h4, .font-outfit {
     display: none;
     font-weight: 600;
     animation: flash-badge 1s infinite alternate;
+    white-space: nowrap;
 }
 
 .mouse-btn.scratching .mouse-scratch-badge {
     display: inline-block;
 }
 
-/* --- Center Column (Visualizer & Playback) --- */
+/* --- Center Column (Dual Video + Playback) --- */
 .center-column {
     display: grid;
-    grid-template-rows: 1fr 160px;
-    gap: 20px;
+    grid-template-rows: 1fr 150px;
+    gap: 15px;
     height: 100%;
+    min-width: 0;
 }
 
-/* Absolute Overlay Video layout */
-.visualizer-container {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    background: #000000;
-    border-radius: 16px;
-    border: 1px solid var(--border-color);
+/* Dual Video Grid (side-by-side) */
+.dual-video-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    flex: 1;
+    padding: 10px;
     overflow: hidden;
 }
 
-#bg-video {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    z-index: 1;
-}
-
-#cage-canvas {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    z-index: 2;
-}
-
-/* Playback Overlay & Controls */
-.playback-controls {
-    position: absolute;
-    bottom: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(15, 23, 42, 0.85);
-    backdrop-filter: blur(12px);
+.video-panel {
+    display: flex;
+    flex-direction: column;
+    border-radius: 10px;
+    overflow: hidden;
     border: 1px solid var(--border-color);
-    padding: 8px 20px;
-    border-radius: 40px;
+    background: #000;
+    min-height: 0;
+}
+
+.video-panel-label {
     display: flex;
     align-items: center;
-    gap: 15px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-    z-index: 3;
+    gap: 5px;
+    padding: 5px 10px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(0, 242, 254, 0.04);
+    border-bottom: 1px solid rgba(0, 242, 254, 0.1);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}
+
+.video-panel-inner {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+}
+
+/* Video placeholder (shown when no video loaded) */
+.video-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+    background: #050810;
+    text-align: center;
+    padding: 10px;
+    transition: opacity 0.3s ease;
+}
+
+.video-placeholder.hidden-placeholder {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Shared Playback Controls Bar (bottom of visualizer panel) */
+.playback-controls-bar {
+    padding: 10px 20px;
+    border-top: 1px solid var(--border-color);
+    background: rgba(10, 15, 30, 0.6);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
 }
 
 .control-btn {
@@ -355,6 +416,7 @@ h1, h2, h3, h4, .font-outfit {
     height: 32px;
     border-radius: 50%;
     transition: var(--transition-smooth);
+    flex-shrink: 0;
 }
 
 .control-btn:hover {
@@ -385,12 +447,9 @@ h1, h2, h3, h4, .font-outfit {
 }
 
 .playback-options {
-    position: absolute;
-    top: 15px;
-    right: 20px;
+    margin-left: auto;
     display: flex;
     gap: 10px;
-    z-index: 10;
 }
 
 .speed-select {
@@ -472,6 +531,7 @@ h1, h2, h3, h4, .font-outfit {
     font-weight: 600;
     color: var(--text-secondary);
     text-align: right;
+    flex-shrink: 0;
 }
 
 .channel-track {
@@ -612,4 +672,29 @@ h1, h2, h3, h4, .font-outfit {
 @keyframes scratch-warning-pulse {
     0% { border-color: rgba(239, 68, 68, 0.3); box-shadow: 0 0 10px rgba(239, 68, 68, 0.1); }
     100% { border-color: rgba(239, 68, 68, 0.9); box-shadow: 0 0 25px rgba(239, 68, 68, 0.4); }
+}
+
+/* Analysis progress bar pulse when running */
+.progress-bar-fill.running {
+    animation: progress-shimmer-pulse 1.2s infinite;
+}
+
+@keyframes progress-shimmer-pulse {
+    0%   { opacity: 0.85; }
+    50%  { opacity: 1; }
+    100% { opacity: 0.85; }
+}
+
+/* Video panel hover glow */
+.video-panel:hover {
+    border-color: rgba(0, 242, 254, 0.2);
+    box-shadow: 0 0 12px rgba(0, 242, 254, 0.06);
+    transition: var(--transition-smooth);
+}
+
+/* Responsive: on narrower screens, stack the video panels vertically */
+@media (max-width: 1280px) {
+    .workspace-grid {
+        grid-template-columns: 260px 1fr 300px;
+    }
 }

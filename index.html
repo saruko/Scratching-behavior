@@ -9,7 +9,7 @@
     <meta name="description" content="SLEAP多個体ポーズトラッキングと尾部カラーIDに基づき、マウスの高速なひっかき動作をリアルタイムに自動検出・分析するインタラクティブなWebダッシュボード。">
     <meta name="keywords" content="SLEAP, SimBA, マウス, ひっかき行動, ポーズ推定, 行動解析, バイオインフォマティクス, 薬理ゲノミクス">
     
-    <!-- Google Fonts Preload (L-4) -->
+    <!-- Google Fonts Preload -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap">
@@ -37,7 +37,6 @@
             </div>
             
             <div class="header-status">
-                <!-- Clickable Workspace indicator -->
                 <div style="font-size: 0.78rem; color: var(--text-secondary); text-align: right; margin-right: 15px;">
                     <div style="font-weight: 600; color: var(--text-primary);">アクティブな作業フォルダ:</div>
                     <code style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.75rem;">mouse-scratch-dashboard/</code>
@@ -48,6 +47,12 @@
                 </div>
             </div>
         </header>
+
+        <!-- Mock Warning Banner -->
+        <div id="mock-warning-banner" style="display: none; background: linear-gradient(90deg, #EF4444 0%, #B91C1C 100%); color: #fff; padding: 10px 20px; font-size: 0.82rem; font-weight: 600; text-align: center; border-radius: 8px; margin: 15px 20px 0 20px; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3); align-items: center; justify-content: center; gap: 10px; z-index: 100;">
+            <i data-lucide="alert-triangle" style="width: 18px; height: 18px;"></i>
+            <span>【⚠️ 学術用途使用不可】現在ロードされているデータはダミー（Mock）で生成されたものです。実際の映像解析結果ではないため、論文等には絶対に使用しないでください。</span>
+        </div>
 
         <!-- ========================================== -->
         <!-- MAIN WORKSPACE GRID                        -->
@@ -64,6 +69,22 @@
                     </div>
                     <div class="panel-body" style="padding: 12px; display: flex; flex-direction: column; gap: 10px;">
                         
+                        <!-- Dynamic Server Result Selector for Comparative Analysis -->
+                        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; border-color: rgba(56, 189, 248, 0.25);">
+                            <div style="font-size: 0.8rem; font-weight: 600; color: #38BDF8; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="line-chart" style="width:14px; height:14px; color: #38BDF8;"></i>比較解析結果の自動ロード (サーバー内)
+                            </div>
+                            <div style="font-size: 0.68rem; color: var(--text-muted); line-height: 1.35; margin-bottom: 2px;">
+                                比較解析によって出力されたモデル別のCSVを、ドラッグ＆ドロップなしでその場で瞬時に切り替えて読み込みます。
+                            </div>
+                            <select id="server-results-select" class="speed-select" style="width: 100%; font-size: 0.72rem; padding: 5px 6px; background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; border-radius:4px; margin-bottom: 2px; cursor: pointer;">
+                                <option value="" selected>-- ロードする比較用CSVを選択 --</option>
+                            </select>
+                            <button id="btn-refresh-server-results" class="mouse-btn" style="padding: 5px; background: rgba(56, 189, 248, 0.08); border-color: #38BDF8; font-size: 0.68rem; justify-content: center; width: 100%;">
+                                <i data-lucide="refresh-cw" style="width: 11px; height: 11px; margin-right: 3px; display: inline;"></i> サーバー結果リストを更新
+                            </button>
+                        </div>
+                        
                         <!-- CSV Loader -->
                         <div class="upload-box" id="csv-drop-zone" style="padding: 15px 10px;">
                             <i data-lucide="upload-cloud" class="upload-icon" style="font-size: 1.5rem; margin-bottom: 5px;"></i>
@@ -74,9 +95,78 @@
                         <!-- Video Loader -->
                         <div class="upload-box" id="video-drop-zone" style="padding: 15px 10px; border-color: rgba(255, 255, 255, 0.08);">
                             <i data-lucide="film" class="upload-icon" style="color:#A855F7; font-size: 1.5rem; margin-bottom: 5px;"></i>
-                            <div class="upload-text" style="font-size: 0.8rem;">実験動画 (.mp4) を選択 / ドロップ</div>
+                            <div class="upload-text" style="font-size: 0.8rem;">実験動画 (.mp4 / .mov / .avi) を選択 / ドロップ</div>
                             <div class="upload-sub" id="video-status-text" style="font-size: 0.7rem; color:var(--text-muted);">動画未ロード (背景は黒)</div>
-                            <input type="file" id="video-file-input" class="hidden" accept="video/mp4,video/*">
+                            <input type="file" id="video-file-input" class="hidden" accept="video/mp4,video/quicktime,video/x-msvideo,video/avi,video/*,.mov,.mp4,.avi">
+                        </div>
+
+                        <!-- Upload Progress Bar -->
+                        <div id="upload-progress-container" style="display: none;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span style="font-size: 0.7rem; color: var(--text-secondary); font-weight: 500;">
+                                    <i data-lucide="upload" style="width: 12px; height: 12px; display: inline;"></i> アップロード読み込み率
+                                </span>
+                                <span id="upload-progress-pct" style="font-size: 0.7rem; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;">0%</span>
+                            </div>
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill" id="upload-progress-bar" style="width: 0%; background: linear-gradient(90deg, var(--accent) 0%, #A855F7 100%);"></div>
+                            </div>
+                            <div id="upload-progress-label" style="font-size: 0.68rem; color: var(--text-muted); margin-top: 3px; text-align: center;"></div>
+                        </div>
+
+                        <!-- FastAPI Automated Pipeline -->
+                        <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; border-color: rgba(168, 85, 247, 0.2);">
+                            <div style="font-size: 0.8rem; font-weight: 600; color: #C084FC; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="play" style="width:14px; height:14px; color: #A855F7;"></i>完全自動解析パイプライン
+                            </div>
+                            
+                            <!-- Analysis Settings Form -->
+                            <div style="display: flex; flex-direction: column; gap: 6px;">
+                                <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px;">
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary); font-weight: 500;">動画の絶対パス (Colab/Drive等):</span>
+                                    <input type="text" id="pipeline-video-path" placeholder="例: /content/drive/MyDrive/300.mov" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; width: 100%; padding: 4px 6px; border-radius:4px; font-size: 0.7rem; box-sizing: border-box;">
+                                </div>
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary);">推定エンジン:</span>
+                                    <select id="pipeline-engine" class="speed-select" style="font-size: 0.7rem; padding: 2px 4px; background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; border-radius:4px;">
+                                        <option value="mock" selected>Mock (ダミーデータ)</option>
+                                        <option value="sleap">SLEAP (実推論)</option>
+                                        <option value="yolov8">YOLOv8 (実推論)</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary);">キャリブレーション (mm/px):</span>
+                                    <input type="number" id="pipeline-calibration" value="0.25" step="0.01" min="0.01" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 60px; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem;">
+                                </div>
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary);">モデルパス (任意):</span>
+                                    <input type="text" id="pipeline-model-path" placeholder="自動検出" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100px; padding:2px 4px; border-radius:4px; font-size: 0.7rem; text-align:right;">
+                                </div>
+                            </div>
+                            
+                            <!-- Analysis Action Button -->
+                            <button id="btn-run-pipeline" class="mouse-btn" style="padding: 8px; background: rgba(168, 85, 247, 0.1); border-color: #A855F7; text-align: center; justify-content: center; font-size: 0.78rem; font-weight:600; width: 100%;" disabled>
+                                解析実行 (動画選択後に有効)
+                            </button>
+
+                            <!-- Analysis Progress Bar -->
+                            <div id="analysis-progress-container" style="display: none;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                    <span style="font-size: 0.7rem; color: var(--text-secondary); font-weight: 500;">
+                                        <i data-lucide="cpu" style="width: 12px; height: 12px; display: inline;"></i> 解析進捗
+                                    </span>
+                                    <span id="analysis-progress-pct" style="font-size: 0.7rem; font-weight: 700; color: #A855F7; font-variant-numeric: tabular-nums;">0%</span>
+                                </div>
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" id="analysis-progress-bar" style="width: 0%; background: linear-gradient(90deg, #A855F7 0%, #EC4899 100%);"></div>
+                                </div>
+                                <div id="analysis-progress-label" style="font-size: 0.68rem; color: var(--text-muted); margin-top: 3px; text-align: center;">処理待機中...</div>
+                            </div>
+                            
+                            <!-- Pipeline Status Console -->
+                            <div id="pipeline-status-panel" style="display: none; background: rgba(0,0,0,0.5); border-radius: 4px; padding: 6px; font-family: monospace; font-size: 0.65rem; color: #38BDF8; max-height: 80px; overflow-y: auto; white-space: pre-wrap; line-height: 1.35; border: 1px solid rgba(255,255,255,0.05);">
+                                待機中...
+                            </div>
                         </div>
 
                     </div>
@@ -125,12 +215,64 @@
                 </div>
 
                 <!-- Manual Correction & ID Swapper Card -->
-                <div class="panel-card" style="flex: 1 1 auto;">
+                <div class="panel-card" style="flex: 1 1 auto; overflow-y: auto;">
                     <div class="panel-header">
                         <h2 class="panel-title"><i data-lucide="edit-3" style="width: 16px; height: 16px;"></i>手動補正ツール</h2>
                     </div>
-                    <div class="panel-body" style="padding: 12px; display: flex; flex-direction: column; gap: 12px;">
+                    <div class="panel-body" style="padding: 12px; display: flex; flex-direction: column; gap: 10px;">
                         
+                        <!-- === NEW: Marker Offset Correction === -->
+                        <div style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 10px;">
+                            <div style="font-size: 0.8rem; font-weight: 600; color: #10B981; margin-bottom: 8px; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="move" style="width:14px; height:14px;"></i>マーカー位置 一括オフセット補正
+                            </div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 8px; line-height: 1.4;">
+                                選択した個体の全関節を指定量だけ一括移動します。マーカーのずれを素早く修正できます。
+                            </div>
+                            <div style="display: flex; flex-direction: column; gap: 6px;">
+                                <!-- Target Mouse -->
+                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary); white-space: nowrap;">対象個体:</span>
+                                    <select id="offset-mouse-id" class="speed-select" style="width: 100%; font-size: 0.7rem;">
+                                        <option value="1">Mouse 1 (赤)</option>
+                                        <option value="2">Mouse 2 (青)</option>
+                                        <option value="3">Mouse 3 (黄)</option>
+                                        <option value="4">Mouse 4 (黒)</option>
+                                    </select>
+                                </div>
+                                <!-- DX / DY -->
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                                    <label style="font-size: 0.7rem; color: var(--text-secondary);">
+                                        X方向 (px):
+                                        <input type="number" id="offset-dx" value="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
+                                    </label>
+                                    <label style="font-size: 0.7rem; color: var(--text-secondary);">
+                                        Y方向 (px):
+                                        <input type="number" id="offset-dy" value="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
+                                    </label>
+                                </div>
+                                <!-- Apply Range -->
+                                <div style="font-size: 0.7rem; color: var(--text-secondary); font-weight: 500;">適用範囲:</div>
+                                <div style="display: flex; flex-direction: column; gap: 4px; padding-left: 4px;">
+                                    <label style="display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-secondary); cursor: pointer;">
+                                        <input type="radio" name="offset-range" id="offset-range-current" value="current" checked style="accent-color: #10B981;">
+                                        現在フレームのみ
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-secondary); cursor: pointer;">
+                                        <input type="radio" name="offset-range" id="offset-range-forward" value="forward" style="accent-color: #10B981;">
+                                        現在フレーム以降すべて
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-secondary); cursor: pointer;">
+                                        <input type="radio" name="offset-range" id="offset-range-all" value="all" style="accent-color: #10B981;">
+                                        全フレームに適用
+                                    </label>
+                                </div>
+                                <button id="btn-apply-offset" class="mouse-btn" style="padding: 7px; background: rgba(16, 185, 129, 0.12); border-color: #10B981; text-align: center; justify-content: center; font-size: 0.75rem; font-weight:600;">
+                                    <i data-lucide="move" style="width: 13px; height: 13px;"></i> オフセット適用
+                                </button>
+                            </div>
+                        </div>
+
                         <!-- ID Swap section -->
                         <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px;">
                             <div style="font-size: 0.8rem; font-weight: 600; color: var(--accent); margin-bottom: 8px; display:flex; align-items:center; gap:5px;">
@@ -166,7 +308,7 @@
                             <div style="font-weight: 600; color: #FFFFFF; margin-bottom: 5px; display:flex; align-items:center; gap:5px;">
                                 <i data-lucide="mouse-pointer-click" style="width:14px; height:14px; color:#10B981;"></i>ノード位置の手動調整
                             </div>
-                            再生を **一時停止** させた状態で、キャンバス上の関節ノード（眼、前足、後足など）をクリックし、任意の場所へ **ドラッグ＆ドロップ** すると座標が即座に手動修正されます。
+                            再生を <strong>一時停止</strong> させた状態で、右側のオーバーレイ映像の関節ノード（眼、前足、後足など）をクリックし、任意の場所へ <strong>ドラッグ＆ドロップ</strong> すると座標が即座に手動修正されます。
                         </div>
 
                         <!-- Export corrected CSV -->
@@ -179,13 +321,13 @@
 
             </section>
 
-            <!-- --- 2. CENTER COLUMN: CAGE VISUALIZER & PLAYBACK TIMELINE --- -->
+            <!-- --- 2. CENTER COLUMN: DUAL VIDEO PANELS & PLAYBACK TIMELINE --- -->
             <section class="center-column">
                 
-                <!-- Main Canvas visualizer -->
+                <!-- Dual Video Panel -->
                 <div class="panel-card" id="visualizer-panel" style="position: relative;">
                     <div class="panel-header">
-                        <h2 class="panel-title"><i data-lucide="eye" style="width: 16px; height: 16px;"></i>ケージ姿勢可視化 (実映像オーバーレイ対応)</h2>
+                        <h2 class="panel-title"><i data-lucide="layout" style="width: 16px; height: 16px;"></i>デュアル映像ビューア</h2>
                         <div class="playback-options">
                             <select id="speed-select" class="speed-select" aria-label="再生速度">
                                 <option value="0.25">0.25x</option>
@@ -197,23 +339,53 @@
                         </div>
                     </div>
                     
-                    <!-- Overlay layer: Canvas on top, video on bottom -->
-                    <div class="visualizer-container" style="background: #000;">
-                        <!-- Background video player, hidden by default until loaded -->
-                        <video id="bg-video" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1;" muted playsinline></video>
-                        
-                        <!-- Overlay Canvas -->
-                        <canvas id="cage-canvas" width="800" height="550" style="position: relative; z-index: 2; cursor: default; background-color: transparent;"></canvas>
-                        
-                        <!-- Overlay playback buttons -->
-                        <div class="playback-controls" style="z-index: 3;">
-                            <button class="control-btn" id="btn-prev" title="前フレームへ"><i data-lucide="skip-back" style="width: 18px; height: 18px;"></i></button>
-                            <button class="control-btn btn-play" id="btn-play" title="再生 / 一時停止"><i data-lucide="play" style="width: 22px; height: 22px; fill: currentColor;"></i></button>
-                            <button class="control-btn" id="btn-next" title="次フレームへ"><i data-lucide="skip-forward" style="width: 18px; height: 18px;"></i></button>
-                            <div class="time-display">
-                                <span id="time-current">00:00.00</span>
-                                <span id="time-total" style="color: var(--text-muted);">/ 00:20.00</span>
+                    <!-- Dual video grid -->
+                    <div class="dual-video-grid">
+
+                        <!-- LEFT: Raw Video Panel -->
+                        <div class="video-panel">
+                            <div class="video-panel-label">
+                                <i data-lucide="video" style="width: 12px; height: 12px;"></i>
+                                元動画 (Raw)
                             </div>
+                            <div class="video-panel-inner" style="background: #000;">
+                                <video id="raw-video" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 1;" muted playsinline></video>
+                                <!-- "No video" placeholder -->
+                                <div id="raw-video-placeholder" class="video-placeholder">
+                                    <i data-lucide="video-off" style="width: 36px; height: 36px; color: rgba(255,255,255,0.15); margin-bottom: 10px;"></i>
+                                    <span style="font-size: 0.78rem; color: var(--text-muted);">動画を左パネルの<br>「実験動画」欄からロード</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- RIGHT: Overlay Video Panel (video + canvas) -->
+                        <div class="video-panel">
+                            <div class="video-panel-label" style="color: #A855F7; border-color: rgba(168, 85, 247, 0.3);">
+                                <i data-lucide="eye" style="width: 12px; height: 12px;"></i>
+                                マーカーオーバーレイ (Overlay)
+                            </div>
+                            <div class="video-panel-inner" style="background: #000;">
+                                <!-- Background video -->
+                                <video id="bg-video" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1;" muted playsinline></video>
+                                <!-- Overlay canvas (skeleton markers) -->
+                                <canvas id="cage-canvas" width="800" height="550" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; cursor: default; background-color: transparent;"></canvas>
+                                <!-- "No video" placeholder -->
+                                <div id="overlay-video-placeholder" class="video-placeholder">
+                                    <i data-lucide="layers" style="width: 36px; height: 36px; color: rgba(168, 85, 247, 0.3); margin-bottom: 10px;"></i>
+                                    <span style="font-size: 0.78rem; color: var(--text-muted);">動画ロード後に骨格<br>オーバーレイを表示</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Shared playback controls bar -->
+                    <div class="playback-controls-bar">
+                        <button class="control-btn" id="btn-prev" title="前フレームへ"><i data-lucide="skip-back" style="width: 18px; height: 18px;"></i></button>
+                        <button class="control-btn btn-play" id="btn-play" title="再生 / 一時停止"><i data-lucide="play" style="width: 22px; height: 22px; fill: currentColor;"></i></button>
+                        <button class="control-btn" id="btn-next" title="次フレームへ"><i data-lucide="skip-forward" style="width: 18px; height: 18px;"></i></button>
+                        <div class="time-display">
+                            <span id="time-current">00:00.00</span>
+                            <span id="time-total" style="color: var(--text-muted);">/ 00:20.00</span>
                         </div>
                     </div>
                 </div>

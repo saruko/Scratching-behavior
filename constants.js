@@ -14,3 +14,11 @@ const KEYPOINTS_LIST = [
     "right_hind_paw",
     "tail_base"
 ];
+
+// Thresholds for scratch behavior classification
+const SCRATCH_THRESHOLDS = {
+    minVelocity: 30,
+    maxHeadDist: 150,
+    minOscillations: 3
+};
+

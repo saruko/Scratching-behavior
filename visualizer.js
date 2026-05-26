@@ -22,6 +22,10 @@ class CageVisualizer {
         this.onNodeDrag = null; // Callback: (mouseId, kpName, x, y)
         this.onNodeDragEnd = null; // Callback: ()
         
+        // Animation timing trackers (B-9)
+        this.animTime = 0;
+        this.lastTimestamp = null;
+        
         // Define colors matching index.css variables
         this.mouseColors = {
             1: { hex: "#EF4444", name: "赤" },
@@ -180,12 +184,20 @@ class CageVisualizer {
         return closest;
     }
 
-    /**
-     * Clear and redraw the canvas based on the frame data
-     */
-    draw(frameData, selectedMouseId = null) {
+    draw(frameData, selectedMouseId = null, timestamp = null) {
         this.currentFrameData = frameData;
         this.selectedMouseId = selectedMouseId;
+
+        if (timestamp !== null) {
+            if (this.lastTimestamp !== null) {
+                const dt = timestamp - this.lastTimestamp;
+                this.animTime += Math.min(dt, 100);
+            }
+            this.lastTimestamp = timestamp;
+        } else {
+            this.animTime = Date.now();
+            this.lastTimestamp = null;
+        }
 
         if (!frameData) return;
 
@@ -380,7 +392,7 @@ class CageVisualizer {
             ctx.save();
             const head = kps["head_center"];
             
-            const ringRadius = 38 + Math.sin(Date.now() * 0.015) * 8;
+            const ringRadius = 38 + Math.sin(this.animTime * 0.015) * 8;
             ctx.beginPath();
             ctx.arc(head.x, head.y, ringRadius, 0, Math.PI * 2);
             ctx.strokeStyle = "rgba(239, 68, 68, 0.6)";

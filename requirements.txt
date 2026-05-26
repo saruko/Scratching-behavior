@@ -1,0 +1,16 @@
+# Mouse Scratch Detection System — pip requirements
+# GPU (CUDA) サポートが必要な場合は environment.yml を使用してください
+# CPU環境 / Google Colab での簡易インストール用
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+opencv-python-headless>=4.9.0
+numpy>=1.23.0,<2.0
+pandas>=2.0.0
+h5py>=3.9.0
+ultralytics>=8.2.0
+httpx>=0.27.0
+# NOTE: PyTorch はシステムにより別途インストールが必要な場合があります
+# GPU (CUDA): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CPU only:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
