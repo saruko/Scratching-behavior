@@ -144,6 +144,33 @@
                                     <span style="font-size: 0.72rem; color: var(--text-secondary);">モデルパス (任意):</span>
                                     <input type="text" id="pipeline-model-path" placeholder="自動検出" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100px; padding:2px 4px; border-radius:4px; font-size: 0.7rem; text-align:right;">
                                 </div>
+
+                                <!-- マウス頭数（0=自動検出） -->
+                                <div style="display: flex; align-items: center; justify-content: space-between;" title="ケージ内マウス数を手動で指定（0=尾部カラーから自動検出）">
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary);">マウス頭数 (0=自動):</span>
+                                    <input type="number" id="pipeline-mice-count" value="0" min="0" max="8" step="1" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 60px; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem;">
+                                </div>
+
+                                <!-- ROI（解析対象矩形領域、px） -->
+                                <details style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 4px; padding: 4px 6px;">
+                                    <summary style="font-size: 0.72rem; color: var(--text-secondary); cursor: pointer; user-select: none;">
+                                        <i data-lucide="crop" style="width: 11px; height: 11px; display: inline;"></i> ROI 設定 (任意, px)
+                                    </summary>
+                                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 6px 2px 2px 2px;">
+                                        <label style="font-size: 0.68rem; color: var(--text-muted);">x1
+                                            <input type="number" id="pipeline-roi-x1" placeholder="自動" min="0" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100%; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem; box-sizing: border-box;">
+                                        </label>
+                                        <label style="font-size: 0.68rem; color: var(--text-muted);">y1
+                                            <input type="number" id="pipeline-roi-y1" placeholder="自動" min="0" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100%; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem; box-sizing: border-box;">
+                                        </label>
+                                        <label style="font-size: 0.68rem; color: var(--text-muted);">x2
+                                            <input type="number" id="pipeline-roi-x2" placeholder="自動" min="0" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100%; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem; box-sizing: border-box;">
+                                        </label>
+                                        <label style="font-size: 0.68rem; color: var(--text-muted);">y2
+                                            <input type="number" id="pipeline-roi-y2" placeholder="自動" min="0" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100%; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem; box-sizing: border-box;">
+                                        </label>
+                                    </div>
+                                </details>
                             </div>
                             
                             <!-- Analysis Action Button -->
@@ -180,32 +207,32 @@
                         <h2 class="panel-title"><i data-lucide="users" style="width: 16px; height: 16px;"></i>個体選択</h2>
                     </div>
                     <div class="panel-body" style="padding: 10px;">
+                        <!-- 動的生成: app.js の initDynamicMiceUI(miceIds) が起動時／CSVロード時に
+                             appState.miceIds をもとにマウスボタン群を再構築する。
+                             デモデータ用に ID 1–4 の初期ボタンを保持しておく。 -->
                         <div class="mouse-selector-list">
-                            <button class="mouse-btn active" id="mouse-btn-1" data-mouse-id="1" style="--active-border-color: var(--color-mouse-1); --active-glow-color: rgba(239, 68, 68, 0.3);">
+                            <button class="mouse-btn active" data-mouse-id="1" style="--active-border-color: var(--color-mouse-1); --active-glow-color: rgba(239, 68, 68, 0.3);">
                                 <div class="mouse-info">
                                     <span class="mouse-color-dot" style="color: var(--color-mouse-1); background-color: currentColor;"></span>
                                     <span class="mouse-label">Mouse 1 (赤)</span>
                                 </div>
                                 <span class="mouse-scratch-badge">ひっかき中</span>
                             </button>
-                            
-                            <button class="mouse-btn" id="mouse-btn-2" data-mouse-id="2" style="--active-border-color: var(--color-mouse-2); --active-glow-color: rgba(59, 130, 246, 0.3);">
+                            <button class="mouse-btn" data-mouse-id="2" style="--active-border-color: var(--color-mouse-2); --active-glow-color: rgba(59, 130, 246, 0.3);">
                                 <div class="mouse-info">
                                     <span class="mouse-color-dot" style="color: var(--color-mouse-2); background-color: currentColor;"></span>
                                     <span class="mouse-label">Mouse 2 (青)</span>
                                 </div>
                                 <span class="mouse-scratch-badge">ひっかき中</span>
                             </button>
-                            
-                            <button class="mouse-btn" id="mouse-btn-3" data-mouse-id="3" style="--active-border-color: var(--color-mouse-3); --active-glow-color: rgba(234, 179, 8, 0.3);">
+                            <button class="mouse-btn" data-mouse-id="3" style="--active-border-color: var(--color-mouse-3); --active-glow-color: rgba(234, 179, 8, 0.3);">
                                 <div class="mouse-info">
                                     <span class="mouse-color-dot" style="color: var(--color-mouse-3); background-color: currentColor;"></span>
                                     <span class="mouse-label">Mouse 3 (黄)</span>
                                 </div>
                                 <span class="mouse-scratch-badge">ひっかき中</span>
                             </button>
-                            
-                            <button class="mouse-btn" id="mouse-btn-4" data-mouse-id="4" style="--active-border-color: var(--color-mouse-4); --active-glow-color: rgba(156, 163, 175, 0.3);">
+                            <button class="mouse-btn" data-mouse-id="4" style="--active-border-color: var(--color-mouse-4); --active-glow-color: rgba(156, 163, 175, 0.3);">
                                 <div class="mouse-info">
                                     <span class="mouse-color-dot" style="color: var(--color-mouse-4); background-color: currentColor;"></span>
                                     <span class="mouse-label">Mouse 4 (黒)</span>
@@ -313,9 +340,68 @@
                             再生を <strong>一時停止</strong> させた状態で、右側のオーバーレイ映像の関節ノード（眼、前足、後足など）をクリックし、任意の場所へ <strong>ドラッグ＆ドロップ</strong> すると座標が即座に手動修正されます。
                         </div>
 
+                        <!-- === NEW: Undo / Redo & Mouse Invalidation === -->
+                        <div style="background: rgba(0, 242, 254, 0.04); border: 1px solid rgba(0, 242, 254, 0.18); border-radius: 8px; padding: 10px;">
+                            <div style="font-size: 0.8rem; font-weight: 600; color: var(--accent); margin-bottom: 8px; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="rotate-ccw" style="width:14px; height:14px;"></i>編集履歴 & 誤検出マスク
+                            </div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 8px; line-height: 1.4;">
+                                ドラッグ／オフセット／スワップ操作は最大 50 件まで Undo (Ctrl+Z) / Redo (Ctrl+Y) 可能です。
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
+                                <button id="btn-undo" class="mouse-btn" style="padding: 6px; background: rgba(0, 242, 254, 0.08); border-color: var(--accent); justify-content: center; font-size: 0.72rem; font-weight: 600;" disabled>
+                                    <i data-lucide="undo-2" style="width: 12px; height: 12px;"></i> Undo
+                                </button>
+                                <button id="btn-redo" class="mouse-btn" style="padding: 6px; background: rgba(0, 242, 254, 0.08); border-color: var(--accent); justify-content: center; font-size: 0.72rem; font-weight: 600;" disabled>
+                                    <i data-lucide="redo-2" style="width: 12px; height: 12px;"></i> Redo
+                                </button>
+                            </div>
+                            <div style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 4px;">現フレームで個体を除外（誤検出マスク）:</div>
+                            <div style="display: flex; gap: 6px; align-items: center;">
+                                <select id="invalid-mouse-id" class="speed-select" style="flex: 1; font-size: 0.72rem;">
+                                    <!-- 動的に initDynamicMiceUI が更新 -->
+                                </select>
+                                <button id="btn-toggle-invalid" class="mouse-btn" style="padding: 6px 10px; background: rgba(239, 68, 68, 0.08); border-color: #EF4444; justify-content: center; font-size: 0.72rem; font-weight: 600;">
+                                    <i data-lucide="x-circle" style="width: 12px; height: 12px;"></i> 切替
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- === NEW: Threshold Editor === -->
+                        <details style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px;">
+                            <summary style="font-size: 0.8rem; font-weight: 600; color: #FBBF24; cursor: pointer; user-select: none; display:flex; align-items:center; gap:5px;">
+                                <i data-lucide="settings-2" style="width:14px; height:14px;"></i>判定閾値の調整 (上級者向け)
+                            </summary>
+                            <div style="font-size: 0.68rem; color: var(--text-muted); margin: 8px 0; line-height: 1.4;">
+                                変更内容はサーバ及びフロント GUI 双方の判定ロジックに即時反映され、ひっかき Bout が再計算されます。
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小速度 (mm/s)
+                                    <input type="number" id="thr-min-vel-mms" step="10" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
+                                </label>
+                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最大耳距離 (mm)
+                                    <input type="number" id="thr-max-head-mm" step="5" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
+                                </label>
+                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振動数
+                                    <input type="number" id="thr-min-osc" step="1" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
+                                </label>
+                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振幅 (px)
+                                    <input type="number" id="thr-min-osc-amp" step="0.5" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
+                                </label>
+                            </div>
+                            <button id="btn-apply-thresholds" class="mouse-btn" style="margin-top: 8px; padding: 7px; background: rgba(251, 191, 36, 0.12); border-color: #FBBF24; text-align: center; justify-content: center; font-size: 0.75rem; font-weight:600; width: 100%;">
+                                <i data-lucide="check" style="width: 13px; height: 13px;"></i> 閾値を適用 & 再計算
+                            </button>
+                        </details>
+
                         <!-- Export corrected CSV -->
-                        <button id="btn-export-csv" class="mouse-btn" style="padding: 10px; background: linear-gradient(135deg, #10B981 0%, #059669 100%); border:none; text-align: center; justify-content: center; font-weight:600; color:#fff; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2); margin-top: auto;">
+                        <button id="btn-export-csv" class="mouse-btn" style="padding: 10px; background: linear-gradient(135deg, #10B981 0%, #059669 100%); border:none; text-align: center; justify-content: center; font-weight:600; color:#fff; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);">
                             <i data-lucide="download" style="width:16px; height:16px; margin-right:5px;"></i>補正後 CSV の出力 (Export)
+                        </button>
+
+                        <!-- === NEW: Annotated Video Export === -->
+                        <button id="btn-export-video" class="mouse-btn" style="padding: 10px; background: linear-gradient(135deg, #A855F7 0%, #7C3AED 100%); border:none; text-align: center; justify-content: center; font-weight:600; color:#fff; box-shadow: 0 4px 12px rgba(168, 85, 247, 0.2); margin-top: auto;" title="現在ロード中の動画にマーカーオーバーレイを焼き付けて WebM 形式で書き出します">
+                            <i data-lucide="video" style="width:16px; height:16px; margin-right:5px;"></i>注釈付き動画を録画 (WebM)
                         </button>
 
                     </div>
@@ -402,7 +488,8 @@
                             <input type="range" id="scrub-slider" min="0" max="599" value="0" aria-label="タイムラインシークバー">
                         </div>
                         
-                        <!-- Track markers -->
+                        <!-- Track markers - 動的生成: app.js の initDynamicMiceUI が
+                             appState.miceIds に基づきチャネル行を再構築する -->
                         <div class="timeline-channels">
                             <div class="channel-row">
                                 <span class="channel-label">Mouse 1</span>

@@ -43,17 +43,35 @@ SKELETON_EDGES = [
 ]
 
 # ── Individual ID via tail-color marking ─────────────────────────────────────
-# Each mouse has its tail painted a unique color.
+# Each mouse has its tail painted a unique color, or has a natural coat color.
 # HSV ranges tuned for lab lighting (adjust after camera calibration).
+# ID 1-4: マーカー（尾部塗装）による個体識別
+# ID 5:   白色マウス（無マーカー）— 高明度・低彩度のHSV範囲
+# ID 6-8: 拡張スロット（ケージ内個体数が増加した際に追加）
 MOUSE_COLORS = {
     1: {"name": "red",    "hsv_lower": (0,   120,  80), "hsv_upper": (10,  255, 255)},
     2: {"name": "blue",   "hsv_lower": (100, 100,  80), "hsv_upper": (130, 255, 255)},
     3: {"name": "yellow", "hsv_lower": (20,  120, 120), "hsv_upper": (35,  255, 255)},
-    4: {"name": "black",  "hsv_lower": (0,   0,    0),  "hsv_upper": (180, 40,   40)}, # M-1: 黒のVを縮小
+    4: {"name": "black",  "hsv_lower": (0,   0,    0),  "hsv_upper": (180, 40,   40)},  # M-1: 黒のVを縮小
+    # 白色マウス: 彩度が低く (S < 50) 明度が高い (V > 170) 領域 — マーカーなし個体の自然毛色
+    # 注意: 背景・床面が白い場合は hsv_lower の V を上げて誤検出を抑制すること
+    5: {"name": "white",  "hsv_lower": (0,   0,  170), "hsv_upper": (180, 50, 255)},
+    # オレンジ・緑・紫: 将来の拡張スロット（有効にするには実験条件に合わせてHSV値を調整）
+    6: {"name": "orange", "hsv_lower": (10,  120,  80), "hsv_upper": (22,  255, 255)},
+    7: {"name": "green",  "hsv_lower": (40,  80,   60), "hsv_upper": (80,  255, 255)},
+    8: {"name": "purple", "hsv_lower": (130, 60,   50), "hsv_upper": (160, 255, 255)},
 }
 # Red also wraps around hue=180 in OpenCV HSV — handled in color_id.py
 RED_WRAP_LOWER = (170, 120, 80)
 RED_WRAP_UPPER = (180, 255, 255)
+
+# 実験で実際に使用するマウスIDの集合（0 = すべてのIDを自動使用）
+# 例: ACTIVE_MOUSE_IDS = "1,2,5" → マーカーなし白マウス (ID=5) を含む3匹構成
+ACTIVE_MOUSE_IDS_STR = _get_env("ACTIVE_MOUSE_IDS", "")
+ACTIVE_MOUSE_IDS: list = (
+    [int(x) for x in ACTIVE_MOUSE_IDS_STR.split(",") if x.strip().isdigit()]
+    if ACTIVE_MOUSE_IDS_STR else []
+)
 
 # ── SLEAP confidence thresholds ──────────────────────────────────────────────
 MIN_CONFIDENCE          = _get_env("MIN_CONFIDENCE", 0.40)  # general keypoints
@@ -85,7 +103,20 @@ BOUT_MERGE_GAP    = _get_env("BOUT_MERGE_GAP", 10)  # merge adjacent bouts separ
 # ── Camera / video defaults ───────────────────────────────────────────────────
 PIXEL_TO_MM_RATIO  = _get_env("PIXEL_TO_MM_RATIO", 0.25)  # mm/pixel: 1px = 0.25mm
 DEFAULT_FPS        = _get_env("DEFAULT_FPS", 30)
-CAGE_MICE_COUNT    = _get_env("CAGE_MICE_COUNT", 4)
+# CAGE_MICE_COUNT: 0 = 動画から自動検出、1以上 = 固定頭数。デフォルト 0 (自動)
+CAGE_MICE_COUNT    = _get_env("CAGE_MICE_COUNT", 0)
+# 最大サポート個体数（GUI描画・タイムライン・データ構造の上限）
+MAX_MICE_LIMIT     = _get_env("MAX_MICE_LIMIT", 8)
+
+# ── 解剖学的整合性フィルタ ─────────────────────────────────────────────────────
+# 体長チェック: neck-to-tail_base の距離（mm）が範囲外なら誤検出とみなす
+# 実験室マウス (C57BL/6 成体) の典型体長は 80〜110 mm
+BODY_LENGTH_MIN_MM    = _get_env("BODY_LENGTH_MIN_MM",   20.0)   # mm: これ未満は誤検出
+BODY_LENGTH_MAX_MM    = _get_env("BODY_LENGTH_MAX_MM",  130.0)   # mm: これ超は誤検出
+# テレポート検出: 連続フレーム間の重心移動量が「体長 × 倍率」を超えたら無効
+MAX_TELEPORT_BODY_LENGTHS = _get_env("MAX_TELEPORT_BODY_LENGTHS", 2.0)
+# 解剖学的チェックの有効/無効フラグ（デフォルト有効）
+ENABLE_ANATOMICAL_CHECKS  = _get_env("ENABLE_ANATOMICAL_CHECKS", True)
 
 # ── Paths (override via CLI or environment variables) ─────────────────────────
 VIDEO_DIR   = _get_env("VIDEO_DIR", "data/videos/")

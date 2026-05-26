@@ -26,13 +26,20 @@ class CageVisualizer {
         this.animTime = 0;
         this.lastTimestamp = null;
         
-        // Define colors matching index.css variables
-        this.mouseColors = {
-            1: { hex: "#EF4444", name: "赤" },
-            2: { hex: "#3B82F6", name: "青" },
-            3: { hex: "#EAB308", name: "黄" },
-            4: { hex: "#9CA3AF", name: "黒" }
-        };
+        // 動的カラーパレット: constants.js の MOUSE_COLOR_PALETTE を参照
+        // 最大 MAX_MICE_LIMIT (8匹) まで対応
+        this.mouseColors = typeof MOUSE_COLOR_PALETTE !== 'undefined'
+            ? MOUSE_COLOR_PALETTE
+            : {
+                1: { hex: "#EF4444", name: "赤" },
+                2: { hex: "#3B82F6", name: "青" },
+                3: { hex: "#EAB308", name: "黄" },
+                4: { hex: "#9CA3AF", name: "黒" },
+                5: { hex: "#F0F0F0", name: "白" },
+                6: { hex: "#F97316", name: "橙" },
+                7: { hex: "#22C55E", name: "緑" },
+                8: { hex: "#A855F7", name: "紫" },
+            };
 
         // SLEAP Skeleton edges mapping
         this.edges = [
@@ -153,6 +160,7 @@ class CageVisualizer {
 
     /**
      * Proximity helper: Find the closest keypoint node in the current frame to (x, y)
+     * 動的マウス数対応: frameData.mice のキーから自動的に全マウスを探索する
      */
     findClosestNode(x, y) {
         if (!this.currentFrameData) return null;
@@ -160,16 +168,18 @@ class CageVisualizer {
         let closest = null;
         let minDist = Infinity;
 
-        // Search the selected mouse first, then other mice
+        // 選択中のマウスを優先し、それ以外はすべてのアクティブなマウスを探索
+        const allIds = Object.keys(this.currentFrameData.mice).map(Number);
         const mouseOrder = [];
         if (this.selectedMouseId) mouseOrder.push(this.selectedMouseId);
-        for (let mId = 1; mId <= 4; mId++) {
+        allIds.forEach(mId => {
             if (mId !== this.selectedMouseId) mouseOrder.push(mId);
-        }
+        });
 
         mouseOrder.forEach(mId => {
             const mData = this.currentFrameData.mice[mId];
-            if (!mData) return;
+            // 無効化（disabled）されたマウスのノードはドラッグ対象外
+            if (!mData || mData.disabled) return;
 
             for (const [kpName, kp] of Object.entries(mData.keypoints)) {
                 if (isNaN(kp.x)) continue;
@@ -238,12 +248,14 @@ class CageVisualizer {
             ctx.strokeRect(10, 10, w - 20, h - 20);
         }
 
-        // 2. Draw each mouse
+        // 2. Draw each mouse (動的マウス数対応: frameData.mice のエントリを全て描画)
         for (const [id, mouseData] of Object.entries(frameData.mice)) {
             const mId = parseInt(id);
             const isSelected = mId === selectedMouseId;
             const isScratching = mouseData.scratch_flag === 1;
-            const colorHex = this.mouseColors[mId].hex;
+            // 動的カラーパレット: 定義されていないIDはデフォルト色にフォールバック
+            const colorEntry = this.mouseColors[mId] || { hex: "#AAAAAA", name: `M${mId}` };
+            const colorHex = colorEntry.hex;
 
             this.drawMouse(mouseData, mId, isSelected, isScratching, colorHex);
         }
@@ -251,6 +263,7 @@ class CageVisualizer {
 
     /**
      * Draw individual mouse contour, skeleton, tail color, and warning labels
+     * disabled フラグが true の場合は半透明のグレーで描画し、判定除外であることを示す
      */
     drawMouse(mouseData, mouseId, isSelected, isScratching, colorHex) {
         const ctx = this.ctx;
@@ -258,6 +271,12 @@ class CageVisualizer {
 
         // Check if essential points are visible
         if (!kps["head_center"] || !kps["spine_mid"] || !kps["tail_base"]) return;
+
+        // 無効化（disabled）されたマウスはグレーでバツ印付きに描画
+        if (mouseData.disabled) {
+            this._drawDisabledMouse(mouseData, mouseId);
+            return;
+        }
 
         // Base opacity settings
         const baseOpacity = isSelected ? 1.0 : 0.45;
@@ -413,7 +432,50 @@ class CageVisualizer {
         ctx.fillStyle = isSelected ? "#FFFFFF" : "rgba(255, 255, 255, 0.55)";
         ctx.font = "600 10.5px Outfit";
         ctx.textAlign = "center";
-        ctx.fillText(`Mouse ${mouseId} (${this.mouseColors[mouseId].name})`, tailB.x, tailB.y + 24);
+        const colorEntry = this.mouseColors[mouseId] || { name: `M${mouseId}` };
+        ctx.fillText(`Mouse ${mouseId} (${colorEntry.name})`, tailB.x, tailB.y + 24);
+        ctx.restore();
+    }
+
+    /**
+     * 無効化されたマウス（disabled=true）を半透明グレーでバツ印付きに描画する。
+     * この個体の検出がその フレームで手動除外されていることを視覚的に示す。
+     */
+    _drawDisabledMouse(mouseData, mouseId) {
+        const ctx = this.ctx;
+        const kps = mouseData.keypoints;
+        const headKp = kps["head_center"];
+        const tailKp = kps["tail_base"];
+        if (!headKp || !tailKp) return;
+
+        const cx = (headKp.x + tailKp.x) / 2;
+        const cy = (headKp.y + tailKp.y) / 2;
+        const R = 22;
+
+        ctx.save();
+        ctx.globalAlpha = 0.4;
+        // グレーの半透明円
+        ctx.beginPath();
+        ctx.arc(cx, cy, R, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(100, 100, 100, 0.3)";
+        ctx.strokeStyle = "rgba(180, 180, 180, 0.6)";
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
+        // バツ印
+        ctx.strokeStyle = "rgba(255, 80, 80, 0.8)";
+        ctx.lineWidth = 2.5;
+        const d = R * 0.6;
+        ctx.beginPath();
+        ctx.moveTo(cx - d, cy - d); ctx.lineTo(cx + d, cy + d);
+        ctx.moveTo(cx + d, cy - d); ctx.lineTo(cx - d, cy + d);
+        ctx.stroke();
+        // ラベル
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = "#FF6060";
+        ctx.font = "600 9px Outfit";
+        ctx.textAlign = "center";
+        ctx.fillText(`M${mouseId} [除外]`, cx, cy + R + 12);
         ctx.restore();
     }
 }

@@ -52,10 +52,17 @@ TASKS_DB: Dict[str, dict] = load_tasks_db()
 
 class AnalysisRequest(BaseModel):
     video_path: str
-    engine: str = "yolov8"     # sleap | yolov8 | dlc | mock
+    engine: str = "yolov8"         # sleap | yolov8 | dlc | mock
     model_path: Optional[str] = None
     fps: Optional[int] = None
     px_to_mm: Optional[float] = 0.25
+    # マウス頭数設定 (0 = 自動検出 — 動画途中で個体数が増減する場合も 0 を推奨)
+    mice_count: int = 0
+    # ROI 設定 (x1, y1, x2, y2 — None の場合は全フレームを対象)
+    roi_x1: Optional[int] = None
+    roi_y1: Optional[int] = None
+    roi_x2: Optional[int] = None
+    roi_y2: Optional[int] = None
     # DLC 専用パラメータ (engine == "dlc" 時に有効)
     dlc_superanimal: Optional[str] = "superanimal_topviewmouse"  # or "superanimal_quadruped"
     dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
@@ -64,6 +71,37 @@ class AnalysisRequest(BaseModel):
     model_config = {
         "protected_namespaces": ()
     }
+
+
+class ConfigUpdateRequest(BaseModel):
+    """
+    実行時にスクラッチ判定閾値を動的に変更するリクエストモデル。
+    フロントエンドの閾値エディタパネルからPOSTされる。
+    変更はプロセスのライフタイム中のみ有効（再起動でリセット）。
+    """
+    SCRATCH_MIN_VELOCITY_MM_S: Optional[float] = None
+    SCRATCH_MAX_HEAD_DIST_MM: Optional[float] = None
+    SCRATCH_MIN_OSCILLATIONS: Optional[int] = None
+    SCRATCH_MIN_OSC_AMPLITUDE_PX: Optional[float] = None
+    SCRATCH_VELOCITY_SMOOTH_FRAMES: Optional[int] = None
+    SCRATCH_WINDOW_FRAMES: Optional[int] = None
+    BOUT_MIN_FRAMES: Optional[int] = None
+    BOUT_MERGE_GAP: Optional[int] = None
+    PIXEL_TO_MM_RATIO: Optional[float] = None
+    DEFAULT_FPS: Optional[float] = None
+    CAGE_MICE_COUNT: Optional[int] = None
+    BODY_LENGTH_MIN_MM: Optional[float] = None
+    BODY_LENGTH_MAX_MM: Optional[float] = None
+    ENABLE_ANATOMICAL_CHECKS: Optional[bool] = None
+
+
+class CorrectionsRequest(BaseModel):
+    """
+    GUI 上で手動補正されたフレームラベルデータを受け取り、
+    既存のCSVファイルを上書き保存するリクエストモデル。
+    """
+    csv_path: str       # outputs/ 配下の既存 CSV のパス（相対または絶対）
+    csv_content: str    # クライアントが生成した補正済み CSV テキスト全体
 
 # --- 1. Dashboard Static Files & Direct Routing ---
 
@@ -120,6 +158,64 @@ async def get_config():
         "SCRATCH_MIN_VELOCITY":  config.SCRATCH_MIN_VELOCITY,
         "SCRATCH_MAX_HEAD_DIST": config.SCRATCH_MAX_HEAD_DIST,
     }
+
+@app.post("/api/config-update")
+async def update_config(req: ConfigUpdateRequest):
+    """
+    実行時にスクラッチ判定閾値を動的に変更します。
+    変更はメモリ上のみ有効で、サーバー再起動でリセットされます。
+    フロントエンドの解析設定パネルからの変更リクエストを処理します。
+    """
+    import config
+    changed = {}
+    for field, value in req.model_dump(exclude_none=True).items():
+        if hasattr(config, field):
+            old_val = getattr(config, field)
+            setattr(config, field, value)
+            changed[field] = {"old": old_val, "new": value}
+            print(f"[Server] [Config] {field}: {old_val} → {value}")
+
+    if not changed:
+        return JSONResponse({"status": "no_change", "changed": {}})
+
+    return JSONResponse({"status": "updated", "changed": changed})
+
+
+@app.post("/api/save-corrections")
+async def save_corrections(req: CorrectionsRequest):
+    """
+    GUI で手動補正されたフレームラベル CSV をサーバーに保存します。
+    セキュリティ: outputs/ ディレクトリ外へのパス トラバーサルを防止します。
+    """
+    # パスの安全解決: outputs/ 配下のみ許可
+    safe_name = os.path.basename(req.csv_path)
+    if not safe_name.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="保存対象は .csv ファイルのみです。")
+    save_path = os.path.join("outputs", safe_name)
+
+    # ディレクトリが存在しない場合は作成
+    os.makedirs("outputs", exist_ok=True)
+
+    try:
+        # バックアップを作成（既存ファイルがある場合）
+        if os.path.exists(save_path):
+            backup_path = save_path.replace(".csv", "_backup.csv")
+            with open(save_path, "r", encoding="utf-8") as f:
+                with open(backup_path, "w", encoding="utf-8") as bf:
+                    bf.write(f.read())
+
+        # 補正済みCSVを書き込み
+        with open(save_path, "w", encoding="utf-8", newline="") as f:
+            f.write(req.csv_content)
+
+        return JSONResponse({
+            "status": "saved",
+            "path": save_path,
+            "bytes": len(req.csv_content.encode("utf-8"))
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CSV保存中にエラーが発生しました: {e}")
+
 
 @app.get("/api/results")
 async def list_results():
@@ -241,6 +337,12 @@ def run_pipeline_task(task_id: str, req: AnalysisRequest):
         cmd.extend(["--model_path", req.model_path])
     if req.fps:
         cmd.extend(["--fps", str(req.fps)])
+    if req.mice_count and req.mice_count > 0:
+        cmd.extend(["--mice-count", str(req.mice_count)])
+    # ROI 指定: 全 4 値が揃っている場合のみ pipeline.py へ伝達
+    if all(v is not None for v in [req.roi_x1, req.roi_y1, req.roi_x2, req.roi_y2]):
+        cmd.extend(["--roi-x1", str(req.roi_x1), "--roi-y1", str(req.roi_y1),
+                    "--roi-x2", str(req.roi_x2), "--roi-y2", str(req.roi_y2)])
     # DLC エンジン専用パラメータ
     if req.engine == "dlc":
         if req.dlc_superanimal:

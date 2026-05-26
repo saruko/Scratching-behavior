@@ -1,9 +1,11 @@
 """
-Tail-Color → Individual ID
-==========================
-Samples the tail region around the `tail_base` keypoint in each video frame
-and classifies the painted color (red / blue / yellow / black) to assign a
-stable mouse_id (1–4) to each SLEAP track.
+Tail-Color → Individual ID  (v2 — 白色マウス・動的個体数対応)
+============================================================
+尾部周辺のHSVカラーサンプリングによって個体IDを割り当てます。
+以下の拡張を含みます:
+  - 白色マウス (ID=5) の自然毛色検出
+  - 最大 MAX_MICE_LIMIT 匹までの動的個体数対応
+  - カラー分類が失敗した場合の体長クラスタリングによるフォールバック ID 割当
 
 Strategy
 --------
@@ -12,6 +14,8 @@ Strategy
 3. Accumulate votes over a rolling window (majority rule).
 4. Resolve conflicts (two tracks claiming the same color) with the
    track that has the higher vote count winning.
+5. [NEW] For tracks with no color match, attempt body-size k-means clustering
+   as a secondary identification method.
 """
 
 import os
@@ -19,12 +23,15 @@ import cv2
 import numpy as np
 import pandas as pd
 from collections import Counter, defaultdict
-from config import MOUSE_COLORS, RED_WRAP_LOWER, RED_WRAP_UPPER
+from config import MOUSE_COLORS, RED_WRAP_LOWER, RED_WRAP_UPPER, MAX_MICE_LIMIT, ACTIVE_MOUSE_IDS
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 SAMPLE_RADIUS    = 12   # px — circle radius around tail_base keypoint
 MIN_MATCH_PX     = 20   # minimum colored pixels to accept a classification
 VOTE_WINDOW      = 30   # frames — rolling window for majority vote
+
+# 白色マウス検出用の最小ピクセル数（白は背景ノイズに弱いため高めに設定）
+WHITE_MIN_MATCH_PX = 40  # px — 白マウスの検出閾値（誤検出抑制）
 
 
 # ── Per-frame color classifier ────────────────────────────────────────────────
@@ -71,13 +78,20 @@ def classify_tail_color(frame: np.ndarray,
     roi_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
     cv2.circle(roi_mask, (cx, cy), SAMPLE_RADIUS, 255, -1)
 
+    # 使用するマウスIDセットの決定
+    # ACTIVE_MOUSE_IDS が設定されていればそのIDのみ使用、空の場合は全MOUSE_COLORSを使用
+    target_ids = ACTIVE_MOUSE_IDS if ACTIVE_MOUSE_IDS else list(MOUSE_COLORS.keys())
+
     best_id, best_count = None, MIN_MATCH_PX
 
-    for mouse_id, info in MOUSE_COLORS.items():
+    for mouse_id in target_ids:
+        if mouse_id not in MOUSE_COLORS:
+            continue
+        info = MOUSE_COLORS[mouse_id]
         lower = np.array(info["hsv_lower"], dtype=np.uint8)
         upper = np.array(info["hsv_upper"], dtype=np.uint8)
 
-        # Red wraps around the HSV hue circle
+        # 赤色はHSV色相環の端 (0付近と180付近) に分布するため両端のマスクを結合する
         if mouse_id == 1:
             m1 = cv2.inRange(roi_hsv, lower, upper)
             m2 = cv2.inRange(roi_hsv,
@@ -88,19 +102,116 @@ def classify_tail_color(frame: np.ndarray,
             color_mask = cv2.inRange(roi_hsv, lower, upper)
 
         hit_count = int(np.count_nonzero(cv2.bitwise_and(color_mask, roi_mask)))
-        if hit_count > best_count:
+
+        # 白色マウス (ID=5) は背景ノイズに弱いため高い検出閾値を設定
+        threshold = WHITE_MIN_MATCH_PX if mouse_id == 5 else MIN_MATCH_PX
+        if hit_count > best_count and hit_count >= threshold:
             best_count, best_id = hit_count, mouse_id
 
     return best_id
 
 
+def _estimate_body_length_px(row: pd.Series) -> float:
+    """
+    neck-to-tail_base 間のピクセル距離を体長の代理値として算出する。
+    カラーIDが割り当てられない個体の体長クラスタリングに使用する。
+    """
+    nx = row.get("neck_x", np.nan)
+    ny = row.get("neck_y", np.nan)
+    tx = row.get("tail_base_x", np.nan)
+    ty = row.get("tail_base_y", np.nan)
+    if any(np.isnan(v) for v in [nx, ny, tx, ty]):
+        return np.nan
+    return float(np.sqrt((nx - tx) ** 2 + (ny - ty) ** 2))
+
+
+def _fallback_assign_by_body_size(
+    unresolved_subtracks: list,
+    subtrack_votes: dict,
+    pose_df: pd.DataFrame,
+    used_ids: set,
+    max_mice: int,
+) -> dict:
+    """
+    カラーIDが割り当てられなかったサブトラックに対して、体長の中央値を使用した
+    k-meansクラスタリングによって代替IDを割り当てる。
+
+    戦略:
+    - サブトラック群の平均体長を計算
+    - 体長が似ている個体を同一IDとして扱う（体長差 < 15px を同一クラスタとみなす）
+    - 使用済みIDを避け、未使用IDで小さい順に割り当てる
+
+    Parameters
+    ----------
+    unresolved_subtracks : ID未割り当てのサブトラックID一覧
+    subtrack_votes       : サブトラックごとの投票リスト
+    pose_df              : 現在の pose DataFrame (体長計算に使用)
+    used_ids             : 既に割り当て済みの mouse_id 集合
+    max_mice             : 最大マウス数 (MAX_MICE_LIMIT)
+
+    Returns
+    -------
+    dict: {subtrack_id: new_mouse_id} の割り当て辞書
+    """
+    # 各サブトラックの平均体長を取得
+    body_lengths = {}
+    for st in unresolved_subtracks:
+        grp = pose_df[pose_df["track"] == st]
+        lengths = grp.apply(_estimate_body_length_px, axis=1).dropna()
+        body_lengths[st] = float(lengths.median()) if not lengths.empty else np.nan
+
+    # 体長が不明なものは後回し
+    valid = {st: bl for st, bl in body_lengths.items() if not np.isnan(bl)}
+    if not valid:
+        return {}
+
+    # 体長でソートし、差分が閾値 (15px) 以下のものを同一クラスタにまとめる
+    CLUSTER_THRESHOLD_PX = 15.0
+    sorted_tracks = sorted(valid.items(), key=lambda x: x[1])
+    clusters: list[list] = []
+    current_cluster: list = []
+
+    for i, (st, bl) in enumerate(sorted_tracks):
+        if not current_cluster:
+            current_cluster.append(st)
+        else:
+            prev_bl = valid[current_cluster[-1]]
+            if abs(bl - prev_bl) <= CLUSTER_THRESHOLD_PX:
+                current_cluster.append(st)
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [st]
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    # 未使用IDを昇順で準備
+    available_ids = [i for i in range(1, max_mice + 1) if i not in used_ids]
+
+    result = {}
+    for cluster, new_id in zip(clusters, available_ids):
+        for st in cluster:
+            result[st] = new_id
+            print(f"[color_id] [Fallback] 体長クラスタリングでID割当: subtrack={st} -> mouse_id={new_id} (体長:{valid[st]:.1f}px)")
+
+    return result
+
+
 # ── Batch assignment for a full video ────────────────────────────────────────
 
-def assign_track_ids(video_path: str, pose_df: pd.DataFrame) -> pd.DataFrame:
+def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
+                     mice_count: int = 0) -> pd.DataFrame:
     """
     動画の全フレームをスキャンし、スライディング窓を用いて各トラックのカラーID確率推移を評価します。
     急激な色の変化（Identity Swap / 混同）を検知した時点で、そのトラックを自動分割し、
-    混同の伝播を防止した上で安定した mouse_id（1–4）を割り当てます。
+    混同の伝播を防止した上で安定した mouse_id を割り当てます。
+
+    [拡張] 白色・無マーカーマウス対応:
+    - MOUSE_COLORS に白 (ID=5) を含めることで白色マウスを尾部HSVで検出
+    - カラー分類が失敗したトラックには体長クラスタリングによる代替IDを割り当て
+
+    [拡張] 動的個体数対応:
+    - mice_count=0 の場合は動画内のトラック数から自動決定
+    - mice_count > 0 の場合はその値を期待最大個体数として使用
 
     Conflict resolution
     -------------------
@@ -109,12 +220,13 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame) -> pd.DataFrame:
 
     Parameters
     ----------
-    video_path : ソース動画のパス (.mp4 / .avi)
-    pose_df    : load_sleap_h5() でロードされたDataFrame
+    video_path  : ソース動画のパス (.mp4 / .avi)
+    pose_df     : load_sleap_h5() でロードされたDataFrame
+    mice_count  : 期待個体数 (0 = 自動検出)
 
     Returns
     -------
-    pose_df with updated 'track' columns and a new 'mouse_id' column (int 1–4 or NaN)
+    pose_df with updated 'track' columns and a new 'mouse_id' column (int or NaN)
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -257,9 +369,40 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame) -> pd.DataFrame:
                             print(f"[color_id] [Warning] フレーム {frame_idx} 内でID重複を解消: "
                                   f"サブトラック {best_subtrack} に ID {m_id} を割り当て、{sub_t} は解除しました。")
 
+    # ── フォールバック: 体長クラスタリングで未解決トラックにIDを割り当てる ─────
+    # カラーが識別できなかったトラック（白色マウスなど）を体長の類似度でクラスタリングする
+    unresolved_subtracks_now = [
+        st for st in subtrack_to_color
+        if subtrack_to_color[st] is None
+    ]
+    if unresolved_subtracks_now:
+        print(f"[color_id] [Info] {len(unresolved_subtracks_now)} サブトラックでカラーID未解決。体長クラスタリングによるフォールバックを試みます。")
+        # 使用済みIDを収集
+        used_ids = set(v for v in subtrack_to_color.values() if v is not None)
+        fallback_map = _fallback_assign_by_body_size(
+            unresolved_subtracks_now,
+            subtrack_votes,
+            pose_df,
+            used_ids,
+            MAX_MICE_LIMIT,
+        )
+        # フォールバック結果をマッピングに反映
+        for st, new_id in fallback_map.items():
+            subtrack_to_color[st] = new_id
+        # pose_df の mouse_id を再マッピング
+        pose_df["mouse_id"] = pose_df["track"].map(lambda t: subtrack_to_color.get(t, None))
+
     unresolved = pose_df["mouse_id"].isna().sum()
     if unresolved:
-        print(f"[color_id] [Warning] {unresolved} フレームで mouse_id が未解決です。")
-        
+        print(f"[color_id] [Warning] {unresolved} フレームで mouse_id が未解決です（フォールバック後）。")
+
+    # ── 動的個体数の検証 ──────────────────────────────────────────────────────
+    detected_count = int(pose_df["mouse_id"].dropna().nunique())
+    expected = mice_count if mice_count > 0 else detected_count
+    print(f"[color_id] [Info] 検出個体数: {detected_count} 匹 (期待値: {expected} 匹)")
+    if mice_count > 0 and detected_count != mice_count:
+        print(f"[color_id] [Warning] 検出個体数 ({detected_count}) が期待値 ({mice_count}) と異なります。"
+              f"動画の途中で個体数が変化している可能性があります。")
+
     return pose_df
 

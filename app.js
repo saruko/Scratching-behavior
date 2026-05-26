@@ -18,7 +18,26 @@ document.addEventListener('DOMContentLoaded', () => {
         rollingWindowSize: 30,
         analysisProgressTimer: null,  // pseudo-progress timer for analysis bar
         pollingInterval: null,        // B-1: Fix polling interval leak
-        isRealProgress: false         // Q-4: Fix pseudo progress bar vs log-extracted progress
+        isRealProgress: false,        // Q-4: Fix pseudo progress bar vs log-extracted progress
+
+        // ── 動的マウス数管理 ─────────────────────────────────────────────────
+        // CSV読み込み時に自動検出される。デモデータは ID 1–4
+        miceIds: [1, 2, 3, 4],
+
+        // ── Undo/Redo スタック ────────────────────────────────────────────────
+        // 操作前のフレームスナップショットを最大 50 件保存する。
+        // 各エントリ: { frameIdx: number, mouseId: number, snapshot: miceObj }
+        undoStack: [],
+        redoStack: [],
+        MAX_UNDO_STACK: 50,
+
+        // ── 編集済みフレーム追跡 ─────────────────────────────────────────────
+        // 手動補正が行われたフレームのインデックスを記録し、タイムライン上にインジケータを描画する
+        editedFrames: new Set(),
+
+        // ── 動画エクスポート ────────────────────────────────────────────────
+        mediaRecorder: null,
+        recordedChunks: [],
     };
 
     // --- 2. Initialize Components ---
@@ -103,8 +122,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const pipelineEngine = document.getElementById('pipeline-engine');
     const pipelineCalibration = document.getElementById('pipeline-calibration');
     const pipelineModelPath = document.getElementById('pipeline-model-path');
+    const pipelineMiceCount = document.getElementById('pipeline-mice-count');
+    const pipelineRoiX1 = document.getElementById('pipeline-roi-x1');
+    const pipelineRoiY1 = document.getElementById('pipeline-roi-y1');
+    const pipelineRoiX2 = document.getElementById('pipeline-roi-x2');
+    const pipelineRoiY2 = document.getElementById('pipeline-roi-y2');
     const pipelineStatusPanel = document.getElementById('pipeline-status-panel');
     const mockWarningBanner = document.getElementById('mock-warning-banner');
+
+    // Undo/Redo widgets (NEW)
+    const btnUndo = document.getElementById('btn-undo');
+    const btnRedo = document.getElementById('btn-redo');
+    const invalidMouseId = document.getElementById('invalid-mouse-id');
+    const btnToggleInvalid = document.getElementById('btn-toggle-invalid');
+    const btnExportVideo = document.getElementById('btn-export-video');
+
+    // Threshold editor widgets (NEW)
+    const thrMinVelMms = document.getElementById('thr-min-vel-mms');
+    const thrMaxHeadMm = document.getElementById('thr-max-head-mm');
+    const thrMinOsc = document.getElementById('thr-min-osc');
+    const thrMinOscAmp = document.getElementById('thr-min-osc-amp');
+    const btnApplyThresholds = document.getElementById('btn-apply-thresholds');
     
     // Feature Inspector cards
     const valSpeedL = document.getElementById('val-speed-l');
@@ -320,7 +358,11 @@ document.addEventListener('DOMContentLoaded', () => {
         for (const [id, mData] of Object.entries(frameData.mice)) {
             const mId = parseInt(id);
             const selectorBtn = document.getElementById(`mouse-btn-${mId}`);
-            
+            // disabled な個体はひっかき判定対象外（ボタンクラスも更新しない）
+            if (mData.disabled) {
+                if (selectorBtn) selectorBtn.classList.remove('scratching');
+                continue;
+            }
             if (mData.scratch_flag === 1) {
                 anyScratching = true;
                 if (selectorBtn) selectorBtn.classList.add('scratching');
@@ -349,6 +391,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // Automatically pause on drag start for stable adjustment
         if (appState.isPlaying) togglePlay();
 
+        // Undo 履歴: ドラッグ開始時のみスナップショットを保存（連続イベント中は重複保存しない）
+        if (!appState._dragSnapshotTaken) {
+            pushUndoSnapshot(appState.currentFrame, mouseId);
+            appState._dragSnapshotTaken = true;
+        }
+
         const frame = appState.data.frames[appState.currentFrame];
         if (!frame || !frame.mice[mouseId]) return;
 
@@ -364,6 +412,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     visualizer.onNodeDragEnd = () => {
+        // ドラッグ終了 → 次の操作で再びスナップショットが取れるようフラグをリセット
+        appState._dragSnapshotTaken = false;
         // Recalculate rolling velocities & check if rule-based classification shifts
         const mId = appState.selectedMouse;
         
@@ -528,6 +578,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const confirmSwap = confirm(`Mouse ${mouseA} と Mouse ${mouseB} の個別IDを\nフレーム ${startF} 以降から動画末尾まで入れ替えます。よろしいですか？`);
         if (!confirmSwap) return;
 
+        // Undo: 起点フレームの両マウスを保存（全フレームを保存するとメモリ過大）
+        pushUndoSnapshot(startF, mouseA);
+        pushUndoSnapshot(startF, mouseB);
+
         // Perform Swap starting at startF to EOF
         for (let f = startF; f < appState.data.numFrames; f++) {
             const frame = appState.data.frames[f];
@@ -612,7 +666,8 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let f = 0; f < appState.data.numFrames; f++) {
             const frame = appState.data.frames[f];
 
-            for (let mId = 1; mId <= 4; mId++) {
+            // 動的マウス数対応: appState.miceIds を使用
+            for (const mId of appState.miceIds) {
                 const mData = frame.mice[mId];
                 if (!mData) continue;
 
@@ -883,18 +938,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    document.querySelectorAll('.mouse-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            const targetBtn = e.currentTarget;
+    // --- 10.5 マウスセレクターボタンイベントの委譲バインド ---
+    // 動的生成ボタンに対応するため、親要素への委譲リスナーを使用する
+    const mouseSelectorList = document.querySelector('.mouse-selector-list');
+    if (mouseSelectorList) {
+        mouseSelectorList.addEventListener('click', (e) => {
+            const targetBtn = e.target.closest('[data-mouse-id]');
+            if (!targetBtn) return;
             const mouseId = parseInt(targetBtn.getAttribute('data-mouse-id'));
-            
             document.querySelectorAll('.mouse-btn').forEach(b => b.classList.remove('active'));
             targetBtn.classList.add('active');
-            
             appState.selectedMouse = mouseId;
             updateUIForFrame();
         });
-    });
+    }
 
     // --- 11. Custom Timeline & Bouts lists ---
     function renderTimelineBouts() {
@@ -912,8 +969,10 @@ document.addEventListener('DOMContentLoaded', () => {
             block.className = 'scratch-block';
             block.style.left = `${startPct}%`;
             block.style.width = `${durationPct}%`;
-            block.style.color = visualizer.mouseColors[mId].hex;
-            block.style.backgroundColor = visualizer.mouseColors[mId].hex;
+            // 動的カラーパレット対応: 未定義 ID はグレーへフォールバック
+            const colorEntry = visualizer.mouseColors[mId] || { hex: "#AAAAAA" };
+            block.style.color = colorEntry.hex;
+            block.style.backgroundColor = colorEntry.hex;
             
             block.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -935,9 +994,11 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.data.bouts.forEach(b => {
             const item = document.createElement('div');
             item.className = 'bout-item';
-            
-            const mouseName = visualizer.mouseColors[b.mouse_id].name;
-            const mouseHex = visualizer.mouseColors[b.mouse_id].hex;
+
+            // 動的カラーパレット対応: 未定義IDはフォールバック
+            const colorEntry = visualizer.mouseColors[b.mouse_id] || { name: `M${b.mouse_id}`, hex: "#AAAAAA" };
+            const mouseName = colorEntry.name;
+            const mouseHex = colorEntry.hex;
 
             item.innerHTML = `
                 <div class="bout-meta">
@@ -1030,31 +1091,46 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                 }
 
+                // 動的マウス数対応: CSV に含まれる全マウスIDを収集
+                const csvMiceIds = new Set();
                 parsedFrames.forEach(row => {
                     const f = row.frame_idx;
                     const mId = row.mouse_id;
-                    if (f < totalFrames && mId >= 1 && mId <= 4) {
+                    // 有効範囲チェック: 1以上 MAX_MICE_LIMIT 以下
+                    if (f < totalFrames && mId >= 1 && mId <= MAX_MICE_LIMIT) {
                         framesArray[f].mice[mId] = {
                             keypoints: row.keypoints,
                             scratch_flag: row.scratch_flag,
                             scratch_prob: row.scratch_prob,
-                            features: row.features
+                            features: row.features,
+                            disabled: false,
                         };
+                        csvMiceIds.add(mId);
                     }
                 });
 
+                // appState.miceIds を CSV から検出されたIDで更新
+                const detectedMiceIds = Array.from(csvMiceIds).sort((a, b) => a - b);
+                appState.miceIds = detectedMiceIds.length > 0 ? detectedMiceIds : [1, 2, 3, 4];
+
+                // 欠損フレーム補完: 前フレームから補間（動的個体数変化に対応）
+                // 途中で個体が現れた場合はそのフレームから補完を開始する（以前に存在しない個体は補完しない）
                 for (let f = 0; f < totalFrames; f++) {
                     const frame = framesArray[f];
-                    for (let mId = 1; mId <= 4; mId++) {
+                    for (const mId of appState.miceIds) {
                         if (!frame.mice[mId]) {
+                            // 前フレームに同IDが存在する場合のみ補完（途中出現前の補完はしない）
                             if (f > 0 && framesArray[f-1].mice[mId]) {
-                                frame.mice[mId] = JSON.parse(JSON.stringify(framesArray[f-1].mice[mId]));
-                                frame.mice[mId].scratch_flag = 0;
-                            } else {
-                                const defaultCenters = { 1: [200, 150], 2: [600, 150], 3: [200, 400], 4: [600, 400] };
-                                const [cx, cy] = defaultCenters[mId];
-                                frame.mice[mId] = createDefaultStaticMouse(cx, cy);
+                                const prev = framesArray[f-1].mice[mId];
+                                frame.mice[mId] = {
+                                    keypoints: JSON.parse(JSON.stringify(prev.keypoints)),
+                                    scratch_flag: 0,
+                                    scratch_prob: 0,
+                                    features: { ...prev.features },
+                                    disabled: false,
+                                };
                             }
+                            // 前フレームに存在しない場合は何もしない（途中登場マウスは空のまま）
                         }
                     }
                 }
@@ -1123,6 +1199,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         scrubSlider.max = appState.data.numFrames - 1;
 
+        // 動的UIの再構築 (マウスセレクター・タイムラインチャネル)
+        initDynamicMiceUI(appState.miceIds);
+        // 編集履歴をリセット
+        appState.undoStack = [];
+        appState.redoStack = [];
+        appState.editedFrames = new Set();
+        updateUndoRedoButtons();
+
         renderTimelineBouts();
         renderBoutsList();
         charts.updateAnalytics(appState.data.bouts);
@@ -1145,7 +1229,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const bouts = [];
         const frames = appState.data.frames;
 
-        for (let mId = 1; mId <= 4; mId++) {
+        // 動的マウス数対応: appState.miceIds を使用（固定 1–4 ループを廃止）
+        for (const mId of appState.miceIds) {
             let inBout = false;
             let startFrame = 0;
             let boutIdx = 1;
@@ -1405,6 +1490,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             // 'all' uses the defaults (0 to numFrames-1)
 
+            // Undo: 現フレームのみスナップショット（範囲オフセット全フレーム保存はメモリ爆発のため避ける）
+            pushUndoSnapshot(appState.currentFrame, mouseId);
+
             let modifiedCount = 0;
             for (let f = startF; f <= endF; f++) {
                 const frame = appState.data.frames[f];
@@ -1462,6 +1550,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const calibration = parseFloat(pipelineCalibration.value) || 0.25;
         const modelPath = pipelineModelPath.value.trim() || null;
 
+        // マウス頭数指定（0 = 自動検出）。バックエンド config.py の CAGE_MICE_COUNT に対応。
+        const miceCount = pipelineMiceCount ? Math.max(0, parseInt(pipelineMiceCount.value) || 0) : 0;
+
+        // ROI(関心領域)指定 — 全空欄なら無視。範囲外検出の抑制に使用。
+        const roiX1 = pipelineRoiX1 && pipelineRoiX1.value !== '' ? parseInt(pipelineRoiX1.value) : null;
+        const roiY1 = pipelineRoiY1 && pipelineRoiY1.value !== '' ? parseInt(pipelineRoiY1.value) : null;
+        const roiX2 = pipelineRoiX2 && pipelineRoiX2.value !== '' ? parseInt(pipelineRoiX2.value) : null;
+        const roiY2 = pipelineRoiY2 && pipelineRoiY2.value !== '' ? parseInt(pipelineRoiY2.value) : null;
+
         // 状態を「進行中」へ変更
         btnRunPipeline.disabled = true;
         btnRunPipeline.textContent = "解析実行中...";
@@ -1483,6 +1580,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 engine: engine,
                 model_path: modelPath,
                 px_to_mm: calibration,
+                mice_count: miceCount,
+                // ROI 指定: 全 4 値が揃っている場合のみ送信
+                ...(roiX1 != null && roiY1 != null && roiX2 != null && roiY2 != null
+                    ? { roi_x1: roiX1, roi_y1: roiY1, roi_x2: roiX2, roi_y2: roiY2 } : {}),
                 // DLC エンジン時のみ Model Zoo モデル名を渡す (それ以外はサーバ側で無視される)
                 ...(dlcSuperanimal ? { dlc_superanimal: dlcSuperanimal } : {})
             })
@@ -1672,38 +1773,43 @@ document.addEventListener('DOMContentLoaded', () => {
                 framesArray.push({ frame_idx: f, mice: {} });
             }
 
-            // モックフラグのグローバル検出
+            // モックフラグのグローバル検出 + 動的マウスID収集
             let isMockData = false;
+            const pipelineMiceIds = new Set();
 
             parsedFrames.forEach(row => {
                 const f = row.frame_idx;
                 const mId = row.mouse_id;
-                if (f < totalFrames && mId >= 1 && mId <= 4) {
+                if (f < totalFrames && mId >= 1 && mId <= MAX_MICE_LIMIT) {
                     framesArray[f].mice[mId] = {
                         keypoints: row.keypoints,
                         scratch_flag: row.scratch_flag,
                         scratch_prob: row.scratch_prob,
-                        features: row.features
+                        features: row.features,
+                        disabled: false,
                     };
+                    pipelineMiceIds.add(mId);
                 }
-                if (row.is_mock === 1) {
-                    isMockData = true;
-                }
+                if (row.is_mock === 1) isMockData = true;
             });
 
-            // 欠損フレームの補完
+            // appState.miceIds を更新
+            appState.miceIds = Array.from(pipelineMiceIds).sort((a, b) => a - b);
+            if (appState.miceIds.length === 0) appState.miceIds = [1, 2, 3, 4];
+
+            // 欠損フレームの補完（途中登場マウスは最初の登場フレーム以降のみ補完）
             for (let f = 0; f < totalFrames; f++) {
                 const frame = framesArray[f];
-                for (let mId = 1; mId <= 4; mId++) {
-                    if (!frame.mice[mId]) {
-                        if (f > 0 && framesArray[f-1].mice[mId]) {
-                            frame.mice[mId] = JSON.parse(JSON.stringify(framesArray[f-1].mice[mId]));
-                            frame.mice[mId].scratch_flag = 0;
-                        } else {
-                            const defaultCenters = { 1: [200, 150], 2: [600, 150], 3: [200, 400], 4: [600, 400] };
-                            const [cx, cy] = defaultCenters[mId];
-                            frame.mice[mId] = createDefaultStaticMouse(cx, cy);
-                        }
+                for (const mId of appState.miceIds) {
+                    if (!frame.mice[mId] && f > 0 && framesArray[f-1].mice[mId]) {
+                        const prev = framesArray[f-1].mice[mId];
+                        frame.mice[mId] = {
+                            keypoints: JSON.parse(JSON.stringify(prev.keypoints)),
+                            scratch_flag: 0,
+                            scratch_prob: 0,
+                            features: { ...prev.features },
+                            disabled: false,
+                        };
                     }
                 }
             }
@@ -1810,36 +1916,40 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 let isMockData = false;
+                const serverMiceIds = new Set();
 
                 parsedFrames.forEach(row => {
                     const f = row.frame_idx;
                     const mId = row.mouse_id;
-                    if (f < totalFrames && mId >= 1 && mId <= 4) {
+                    if (f < totalFrames && mId >= 1 && mId <= MAX_MICE_LIMIT) {
                         framesArray[f].mice[mId] = {
                             keypoints: row.keypoints,
                             scratch_flag: row.scratch_flag,
                             scratch_prob: row.scratch_prob,
-                            features: row.features
+                            features: row.features,
+                            disabled: false,
                         };
+                        serverMiceIds.add(mId);
                     }
                     if (row.is_mock === 1 || resName.toLowerCase().includes('mock')) {
                         isMockData = true;
                     }
                 });
 
-                // Missing frames interpolation
+                appState.miceIds = Array.from(serverMiceIds).sort((a, b) => a - b);
+                if (appState.miceIds.length === 0) appState.miceIds = [1, 2, 3, 4];
+
+                // Missing frames interpolation (動的マウス数対応)
                 for (let f = 0; f < totalFrames; f++) {
                     const frame = framesArray[f];
-                    for (let mId = 1; mId <= 4; mId++) {
-                        if (!frame.mice[mId]) {
-                            if (f > 0 && framesArray[f-1].mice[mId]) {
-                                frame.mice[mId] = JSON.parse(JSON.stringify(framesArray[f-1].mice[mId]));
-                                frame.mice[mId].scratch_flag = 0;
-                            } else {
-                                const defaultCenters = { 1: [200, 150], 2: [600, 150], 3: [200, 400], 4: [600, 400] };
-                                const [cx, cy] = defaultCenters[mId];
-                                frame.mice[mId] = createDefaultStaticMouse(cx, cy);
-                            }
+                    for (const mId of appState.miceIds) {
+                        if (!frame.mice[mId] && f > 0 && framesArray[f-1].mice[mId]) {
+                            const prev = framesArray[f-1].mice[mId];
+                            frame.mice[mId] = {
+                                keypoints: JSON.parse(JSON.stringify(prev.keypoints)),
+                                scratch_flag: 0, scratch_prob: 0,
+                                features: { ...prev.features }, disabled: false,
+                            };
                         }
                     }
                 }
@@ -1887,7 +1997,394 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ==========================================================================
+    // --- 12.8 動的マウスUI / Undo・Redo / 無効化マスク / 動画録画 (NEW) ---
+    // ==========================================================================
+
+    /**
+     * マウス選択 UI とタイムラインチャネルを appState.miceIds に基づいて再構築する。
+     *
+     * 動的マウス数に対応するため、以下の DOM 要素を都度作り直す:
+     *   1) .mouse-selector-list 内の `.mouse-btn`
+     *   2) .timeline-channels 内の `.channel-row` / `.channel-track`
+     *   3) #swap-mouse-a, #swap-mouse-b, #offset-mouse-id, #invalid-mouse-id の <select>
+     *
+     * @param {number[]} miceIds - 描画対象マウスID配列（例: [1,2,3,4,5]）
+     */
+    function initDynamicMiceUI(miceIds) {
+        if (!Array.isArray(miceIds) || miceIds.length === 0) {
+            miceIds = [1, 2, 3, 4];
+        }
+
+        // ── (1) マウスセレクター ─────────────────────────────────────────────
+        const selectorList = document.querySelector('.mouse-selector-list');
+        if (selectorList) {
+            selectorList.innerHTML = '';
+            miceIds.forEach((mId, idx) => {
+                const palette = (typeof MOUSE_COLOR_PALETTE !== 'undefined' && MOUSE_COLOR_PALETTE[mId])
+                    ? MOUSE_COLOR_PALETTE[mId]
+                    : { hex: '#AAAAAA', name: `M${mId}`, cssVar: '--text-muted', glowRgb: '170, 170, 170' };
+                const btn = document.createElement('button');
+                btn.className = 'mouse-btn' + (idx === 0 ? ' active' : '');
+                btn.id = `mouse-btn-${mId}`;
+                btn.dataset.mouseId = mId;
+                btn.style.setProperty('--active-border-color', `var(${palette.cssVar})`);
+                btn.style.setProperty('--active-glow-color', `rgba(${palette.glowRgb}, 0.3)`);
+                btn.innerHTML = `
+                    <div class="mouse-info">
+                        <span class="mouse-color-dot" style="color: ${palette.hex}; background-color: currentColor;"></span>
+                        <span class="mouse-label">Mouse ${mId} (${palette.name})</span>
+                    </div>
+                    <span class="mouse-scratch-badge">ひっかき中</span>
+                `;
+                selectorList.appendChild(btn);
+            });
+        }
+
+        // ── (2) タイムラインチャネル ─────────────────────────────────────────
+        const channelContainer = document.querySelector('.timeline-channels');
+        if (channelContainer) {
+            channelContainer.innerHTML = '';
+            miceIds.forEach((mId) => {
+                const palette = (typeof MOUSE_COLOR_PALETTE !== 'undefined' && MOUSE_COLOR_PALETTE[mId])
+                    ? MOUSE_COLOR_PALETTE[mId]
+                    : { hex: '#AAAAAA', name: `M${mId}` };
+                const row = document.createElement('div');
+                row.className = 'channel-row';
+                row.innerHTML = `
+                    <span class="channel-label" style="color: ${palette.hex};">Mouse ${mId}</span>
+                    <div class="channel-track" id="track-mouse-${mId}"></div>
+                `;
+                channelContainer.appendChild(row);
+            });
+        }
+
+        // ── (3) ID選択用 <select> 群を全て再生成 ─────────────────────────────
+        const _rebuildSelect = (sel, defaultIndex = 0) => {
+            if (!sel) return;
+            sel.innerHTML = '';
+            miceIds.forEach((mId) => {
+                const palette = (typeof MOUSE_COLOR_PALETTE !== 'undefined' && MOUSE_COLOR_PALETTE[mId])
+                    ? MOUSE_COLOR_PALETTE[mId] : { name: `M${mId}` };
+                const opt = document.createElement('option');
+                opt.value = String(mId);
+                opt.textContent = `Mouse ${mId} (${palette.name})`;
+                sel.appendChild(opt);
+            });
+            if (sel.options.length > defaultIndex) sel.selectedIndex = defaultIndex;
+        };
+        _rebuildSelect(document.getElementById('swap-mouse-a'), 0);
+        _rebuildSelect(document.getElementById('swap-mouse-b'), Math.min(1, miceIds.length - 1));
+        _rebuildSelect(document.getElementById('offset-mouse-id'), 0);
+        _rebuildSelect(document.getElementById('invalid-mouse-id'), 0);
+
+        // ── (4) 選択中マウス整合性チェック ───────────────────────────────────
+        if (!miceIds.includes(appState.selectedMouse)) {
+            appState.selectedMouse = miceIds[0];
+        }
+        // active クラスを選択中マウスに合わせる
+        const activeBtn = document.getElementById(`mouse-btn-${appState.selectedMouse}`);
+        if (activeBtn) {
+            document.querySelectorAll('.mouse-btn').forEach(b => b.classList.remove('active'));
+            activeBtn.classList.add('active');
+        }
+
+        // Lucide アイコン再生成
+        if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons();
+    }
+
+    /**
+     * Undo スタックに現在フレームの mouse スナップショットを保存。
+     * 50 件を超えた場合は最古を捨てる。Redo スタックは編集発生でクリアされる。
+     *
+     * @param {number} frameIdx - 対象フレームインデックス
+     * @param {number} mouseId  - 対象マウスID
+     */
+    function pushUndoSnapshot(frameIdx, mouseId) {
+        const frame = appState.data.frames[frameIdx];
+        if (!frame || !frame.mice[mouseId]) return;
+        const snapshot = JSON.parse(JSON.stringify(frame.mice[mouseId]));
+        appState.undoStack.push({ frameIdx, mouseId, snapshot });
+        if (appState.undoStack.length > appState.MAX_UNDO_STACK) {
+            appState.undoStack.shift();
+        }
+        appState.redoStack = [];
+        appState.editedFrames.add(frameIdx);
+        updateUndoRedoButtons();
+    }
+
+    /**
+     * Undo: 直近の操作を取り消し、現在状態を Redo スタックへ移す。
+     */
+    function undo() {
+        if (appState.undoStack.length === 0) return;
+        const entry = appState.undoStack.pop();
+        const frame = appState.data.frames[entry.frameIdx];
+        if (!frame) { updateUndoRedoButtons(); return; }
+
+        // 現在状態を Redo へ退避
+        const currentSnap = frame.mice[entry.mouseId]
+            ? JSON.parse(JSON.stringify(frame.mice[entry.mouseId])) : null;
+        appState.redoStack.push({ frameIdx: entry.frameIdx, mouseId: entry.mouseId, snapshot: currentSnap });
+
+        // 復元
+        frame.mice[entry.mouseId] = entry.snapshot;
+
+        // 速度等は周辺フレーム再計算が必要
+        const start = Math.max(1, entry.frameIdx - 15);
+        const end   = Math.min(appState.data.numFrames - 1, entry.frameIdx + 15);
+        for (let f = start; f <= end; f++) {
+            recalculateFrameKinematics(f, entry.mouseId);
+        }
+        autoGenerateBoutsFromFlags();
+        renderTimelineBouts();
+        renderBoutsList();
+        charts.updateAnalytics(appState.data.bouts);
+
+        appState.currentFrame = entry.frameIdx;
+        updateUIForFrame(false);
+        updateUndoRedoButtons();
+    }
+
+    /**
+     * Redo: 取り消した操作をやり直し、現在状態を Undo スタックへ戻す。
+     */
+    function redo() {
+        if (appState.redoStack.length === 0) return;
+        const entry = appState.redoStack.pop();
+        const frame = appState.data.frames[entry.frameIdx];
+        if (!frame || !entry.snapshot) { updateUndoRedoButtons(); return; }
+
+        const currentSnap = frame.mice[entry.mouseId]
+            ? JSON.parse(JSON.stringify(frame.mice[entry.mouseId])) : null;
+        appState.undoStack.push({ frameIdx: entry.frameIdx, mouseId: entry.mouseId, snapshot: currentSnap });
+
+        frame.mice[entry.mouseId] = entry.snapshot;
+
+        const start = Math.max(1, entry.frameIdx - 15);
+        const end   = Math.min(appState.data.numFrames - 1, entry.frameIdx + 15);
+        for (let f = start; f <= end; f++) {
+            recalculateFrameKinematics(f, entry.mouseId);
+        }
+        autoGenerateBoutsFromFlags();
+        renderTimelineBouts();
+        renderBoutsList();
+        charts.updateAnalytics(appState.data.bouts);
+
+        appState.currentFrame = entry.frameIdx;
+        updateUIForFrame(false);
+        updateUndoRedoButtons();
+    }
+
+    /**
+     * Undo/Redo ボタンの有効/無効状態をスタック深度に従って更新。
+     */
+    function updateUndoRedoButtons() {
+        if (btnUndo) {
+            btnUndo.disabled = appState.undoStack.length === 0;
+            btnUndo.title = `Undo (Ctrl+Z) — 履歴: ${appState.undoStack.length}/${appState.MAX_UNDO_STACK}`;
+        }
+        if (btnRedo) {
+            btnRedo.disabled = appState.redoStack.length === 0;
+            btnRedo.title = `Redo (Ctrl+Y) — 再実行可能: ${appState.redoStack.length}`;
+        }
+    }
+
+    /**
+     * 現フレームにおける指定マウスの「無効（誤検出）」フラグを切り替える。
+     * 無効化されたマウスは scratch 判定とアラームから除外され、可視化上は灰色＋[除外]表示。
+     */
+    function toggleMouseInvalid(mouseId) {
+        const frame = appState.data.frames[appState.currentFrame];
+        if (!frame || !frame.mice[mouseId]) {
+            alert(`⚠️ 現フレームに Mouse ${mouseId} のデータが存在しません。`);
+            return;
+        }
+        pushUndoSnapshot(appState.currentFrame, mouseId);
+        frame.mice[mouseId].disabled = !frame.mice[mouseId].disabled;
+        if (frame.mice[mouseId].disabled) {
+            // 無効化時はスクラッチ判定もクリア
+            frame.mice[mouseId].scratch_flag = 0;
+            frame.mice[mouseId].scratch_prob = 0.0;
+        }
+        autoGenerateBoutsFromFlags();
+        renderTimelineBouts();
+        renderBoutsList();
+        charts.updateAnalytics(appState.data.bouts);
+        updateUIForFrame(false);
+    }
+
+    /**
+     * 注釈付き動画の録画 (MediaRecorder API)。
+     * オーバーレイ canvas を MediaStream で取得し、再生中の bgVideo と同期して
+     * 全フレームを WebM (VP9) で書き出す。
+     */
+    function exportAnnotatedVideo() {
+        const canvas = document.getElementById('cage-canvas');
+        if (!canvas) {
+            alert("⚠️ オーバーレイキャンバスが見つかりません。");
+            return;
+        }
+        if (typeof MediaRecorder === 'undefined') {
+            alert("⚠️ お使いのブラウザは MediaRecorder API に対応していません。Chrome/Edge の最新版をご使用ください。");
+            return;
+        }
+        if (appState.mediaRecorder && appState.mediaRecorder.state === 'recording') {
+            // 録画中: 停止
+            appState.mediaRecorder.stop();
+            return;
+        }
+
+        // FPS は動画 fps か既定値を使用
+        const fps = (appState.data && appState.data.fps) || SCRATCH_THRESHOLDS.fps || 30;
+        let stream;
+        try {
+            stream = canvas.captureStream(fps);
+        } catch (e) {
+            alert(`⚠️ canvas.captureStream に失敗しました: ${e.message}`);
+            return;
+        }
+
+        // ブラウザサポートの mime を順に試行
+        const mimeCandidates = [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm'
+        ];
+        let mimeType = '';
+        for (const m of mimeCandidates) {
+            if (MediaRecorder.isTypeSupported(m)) { mimeType = m; break; }
+        }
+        if (!mimeType) {
+            alert("⚠️ サポート可能な WebM コーデックが見つかりません。");
+            return;
+        }
+
+        appState.recordedChunks = [];
+        try {
+            appState.mediaRecorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4_000_000 });
+        } catch (e) {
+            alert(`⚠️ MediaRecorder 生成失敗: ${e.message}`);
+            return;
+        }
+
+        appState.mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) appState.recordedChunks.push(e.data);
+        };
+        appState.mediaRecorder.onstop = () => {
+            const blob = new Blob(appState.recordedChunks, { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            a.download = `mouse_scratch_annotated_${ts}.webm`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            btnExportVideo.innerHTML = '<i data-lucide="video" style="width:16px; height:16px; margin-right:5px;"></i>注釈付き動画を録画 (WebM)';
+            btnExportVideo.style.background = 'linear-gradient(135deg, #A855F7 0%, #7C3AED 100%)';
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+        };
+
+        appState.mediaRecorder.start(250);  // 250ms ごとに dataavailable
+        btnExportVideo.innerHTML = '<i data-lucide="square" style="width:16px; height:16px; margin-right:5px;"></i>録画停止';
+        btnExportVideo.style.background = 'linear-gradient(135deg, #EF4444 0%, #B91C1C 100%)';
+        if (typeof lucide !== 'undefined') lucide.createIcons();
+
+        // 動画が再生中でなければ自動再生（描画ループ駆動のため）
+        if (!appState.isPlaying) togglePlay();
+
+        // 動画終端到達で自動停止
+        const stopOnEnd = () => {
+            if (appState.mediaRecorder && appState.mediaRecorder.state === 'recording') {
+                appState.mediaRecorder.stop();
+            }
+            if (bgVideo) bgVideo.removeEventListener('ended', stopOnEnd);
+        };
+        if (bgVideo) bgVideo.addEventListener('ended', stopOnEnd);
+    }
+
+    // ── イベントバインド: Undo/Redo/Invalid/Video Export ──────────────────────
+    if (btnUndo) btnUndo.addEventListener('click', undo);
+    if (btnRedo) btnRedo.addEventListener('click', redo);
+    if (btnToggleInvalid) {
+        btnToggleInvalid.addEventListener('click', () => {
+            const mId = parseInt(invalidMouseId.value);
+            if (!isNaN(mId)) toggleMouseInvalid(mId);
+        });
+    }
+    if (btnExportVideo) btnExportVideo.addEventListener('click', exportAnnotatedVideo);
+
+    // ── キーボードショートカット (Ctrl+Z / Ctrl+Y) ───────────────────────────
+    document.addEventListener('keydown', (e) => {
+        // テキスト入力中は無効化
+        const tag = (document.activeElement && document.activeElement.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+            e.preventDefault(); undo();
+        } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' ||
+                   (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+            e.preventDefault(); redo();
+        }
+    });
+
+    // ── 閾値エディタ: 入力欄初期化 & 適用ボタン ──────────────────────────────
+    function syncThresholdInputs() {
+        if (thrMinVelMms) thrMinVelMms.value = SCRATCH_THRESHOLDS.minVelocityMmS;
+        if (thrMaxHeadMm) thrMaxHeadMm.value = SCRATCH_THRESHOLDS.maxHeadDistMm;
+        if (thrMinOsc)    thrMinOsc.value    = SCRATCH_THRESHOLDS.minOscillations;
+        if (thrMinOscAmp) thrMinOscAmp.value = SCRATCH_THRESHOLDS.minOscAmplitudePx;
+    }
+    syncThresholdInputs();
+
+    if (btnApplyThresholds) {
+        btnApplyThresholds.addEventListener('click', () => {
+            const newMinVel  = parseFloat(thrMinVelMms.value);
+            const newMaxHead = parseFloat(thrMaxHeadMm.value);
+            const newMinOsc  = parseInt(thrMinOsc.value);
+            const newMinAmp  = parseFloat(thrMinOscAmp.value);
+            if ([newMinVel, newMaxHead, newMinOsc, newMinAmp].some(v => isNaN(v) || v < 0)) {
+                alert("⚠️ 閾値は0以上の数値を入力してください。"); return;
+            }
+            SCRATCH_THRESHOLDS.minVelocityMmS    = newMinVel;
+            SCRATCH_THRESHOLDS.maxHeadDistMm     = newMaxHead;
+            SCRATCH_THRESHOLDS.minOscillations   = newMinOsc;
+            SCRATCH_THRESHOLDS.minOscAmplitudePx = newMinAmp;
+
+            // バックエンドへも反映 (失敗してもフロント側計算は続行)
+            fetch('/api/config-update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    SCRATCH_MIN_VELOCITY_MM_S:    newMinVel,
+                    SCRATCH_MAX_HEAD_DIST_MM:     newMaxHead,
+                    SCRATCH_MIN_OSCILLATIONS:     newMinOsc,
+                    SCRATCH_MIN_OSC_AMPLITUDE_PX: newMinAmp,
+                })
+            }).catch(err => console.warn('[Config] サーバ閾値同期失敗:', err));
+
+            // 全フレーム再計算 (動的 mice ループ)
+            for (let f = 1; f < appState.data.numFrames; f++) {
+                for (const mId of appState.miceIds) {
+                    recalculateFrameKinematics(f, mId);
+                }
+            }
+            autoGenerateBoutsFromFlags();
+            renderTimelineBouts();
+            renderBoutsList();
+            charts.updateAnalytics(appState.data.bouts);
+            updateUIForFrame(false);
+            alert(`✓ 閾値を適用して全フレーム再計算しました。\n  最小速度: ${newMinVel} mm/s\n  最大耳距離: ${newMaxHead} mm\n  最小振動: ${newMinOsc}\n  最小振幅: ${newMinAmp} px`);
+        });
+    }
+
     // --- 13. Initial Kickoff ---
+    // デモデータの初期マウスIDを appState に同期
+    if (appState.data && appState.data.frames && appState.data.frames[0]) {
+        const initialMice = Object.keys(appState.data.frames[0].mice).map(n => parseInt(n)).sort((a, b) => a - b);
+        if (initialMice.length > 0) appState.miceIds = initialMice;
+    }
+    initDynamicMiceUI(appState.miceIds);
+    updateUndoRedoButtons();
     updateUIForFrame();
     renderTimelineBouts();
     renderBoutsList();

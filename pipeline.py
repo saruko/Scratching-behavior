@@ -14,25 +14,37 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from config import KEYPOINTS, DEFAULT_FPS, CAGE_MICE_COUNT
+from config import KEYPOINTS, DEFAULT_FPS, CAGE_MICE_COUNT, MAX_MICE_LIMIT
 import color_id
 import feature_extraction
 import pose_engine
 
-def create_mock_sleap_data(n_frames: int = 150) -> pd.DataFrame:
+def create_mock_sleap_data(n_frames: int = 150, mice_count: int = 0) -> pd.DataFrame:
     """
     h5py が利用できない環境や、SLEAPデータが指定されていない場合のフォールバックとして、
-    4匹のマウスが動くダミーのトラッキング座標 DataFrame を生成します。
+    指定頭数のマウスが動くダミーのトラッキング座標 DataFrame を生成します。
+
+    Parameters
+    ----------
+    n_frames   : 生成するフレーム数
+    mice_count : 生成するマウスの頭数 (0 = デフォルト4匹)
     """
-    print("[pipeline] [Info] テスト用のダミーポーズデータ(Mock)を生成します。")
+    n_mice = mice_count if mice_count > 0 else (CAGE_MICE_COUNT if CAGE_MICE_COUNT > 0 else 4)
+    n_mice = min(n_mice, MAX_MICE_LIMIT)  # 最大数を超えないようにクランプ
+    print(f"[pipeline] [Info] テスト用のダミーポーズデータ(Mock)を生成します。マウス数: {n_mice} 匹")
     records = []
-    
-    # 4匹のケージ内初期中心座標 (動画 test_swap.mp4 のサークル座標 100,120 および 200,120 にアライメント)
+
+    # n_mice 匹分のケージ内初期中心座標をグリッド状に配置
+    # 配置例: 2列 × ceil(n_mice/2) 行
+    import math
+    cols = 2
+    rows = math.ceil(n_mice / cols)
+    base_centers_x = [100 + (i % cols) * 140 for i in range(n_mice)]
+    base_centers_y = [100 + (i // cols) * 80  for i in range(n_mice)]
+
     centers = {
-        "track_0": (100, 120),
-        "track_1": (200, 120),
-        "track_2": (100, 180),
-        "track_3": (220, 180),
+        f"track_{i}": (base_centers_x[i], base_centers_y[i])
+        for i in range(n_mice)
     }
 
     # 各キーポイントの相対オフセット (簡易的なスケルトン用)
@@ -167,8 +179,24 @@ def main():
     parser.add_argument("--gt-format", type=str, default="frame", choices=["frame", "bout"],
                         help="GT CSV のフォーマット (frame または bout, デフォルト: frame)")
     parser.add_argument("--iou", type=float, default=0.5, help="Bout 評価の Temporal IoU 閾値 (デフォルト: 0.5)")
+    parser.add_argument("--mice-count", type=int, default=0,
+                        help="ケージ内マウスの頭数 (0 = 自動検出。動画途中から増減する場合も 0 を推奨)")
+    # ROI(関心領域): 指定すると矩形外の検出は学術判定から除外される (px 単位)
+    parser.add_argument("--roi-x1", type=int, default=None, help="ROI 矩形 左上 X 座標 (px, 任意)")
+    parser.add_argument("--roi-y1", type=int, default=None, help="ROI 矩形 左上 Y 座標 (px, 任意)")
+    parser.add_argument("--roi-x2", type=int, default=None, help="ROI 矩形 右下 X 座標 (px, 任意)")
+    parser.add_argument("--roi-y2", type=int, default=None, help="ROI 矩形 右下 Y 座標 (px, 任意)")
 
     args = parser.parse_args()
+
+    # ── ROI 値を環境変数経由で feature_extraction に伝達 ──
+    # config.py の動的読み込みパターンを踏襲（モジュール間のグローバル共有を避ける）
+    if all(v is not None for v in [args.roi_x1, args.roi_y1, args.roi_x2, args.roi_y2]):
+        os.environ["ROI_X1"] = str(args.roi_x1)
+        os.environ["ROI_Y1"] = str(args.roi_y1)
+        os.environ["ROI_X2"] = str(args.roi_x2)
+        os.environ["ROI_Y2"] = str(args.roi_y2)
+        print(f"[pipeline] [Info] ROI 指定を有効化: ({args.roi_x1},{args.roi_y1})-({args.roi_x2},{args.roi_y2})")
 
     # 環境変数または引数でFPSなどを一時的にオーバーライドする設定
     if args.fps is not None:
@@ -264,7 +292,8 @@ def main():
                 print(f"[pipeline] [Warning] 動画形式 '{video_ext}' は公式テスト済み形式外の可能性がありますが、OpenCVでの読み込みを試みます。")
             if video_ext == '.mov':
                 print(f"[pipeline] [Info] MOV形式を検出しました。OpenCVはMOVをサポートしていますが、H.264コーデックでエンコードされている必要があります。")
-            aligned_df = color_id.assign_track_ids(args.video, pose_df)
+            aligned_df = color_id.assign_track_ids(args.video, pose_df,
+                                                    mice_count=args.mice_count)
     except Exception as e:
         print(f"[pipeline] [Error] カラーID割り当て中に予期しないエラーが発生しました: {e}")
         print("[pipeline] トラックIDから暫定IDを割り当てて処理を続行します。")

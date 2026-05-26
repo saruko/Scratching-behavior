@@ -11,9 +11,34 @@ Feature Extraction and Rule-Based Scratch Classifier  (v2 — Academic Quality)
   [8] compute_summary_stats() で観察時間正規化済み統計量を出力
 """
 
+import os
 import numpy as np
 import pandas as pd
 from collections import deque
+
+# ── ROI（関心領域）読み込み — pipeline.py が環境変数経由で渡す ─────────
+# 全 4 値が揃った場合のみ ROI フィルタを有効化（部分指定は無効）。
+def _load_roi_from_env():
+    try:
+        x1 = os.environ.get("ROI_X1"); y1 = os.environ.get("ROI_Y1")
+        x2 = os.environ.get("ROI_X2"); y2 = os.environ.get("ROI_Y2")
+        if all(v is not None and v != "" for v in (x1, y1, x2, y2)):
+            return (int(x1), int(y1), int(x2), int(y2))
+    except Exception:
+        return None
+    return None
+ROI_BOX = _load_roi_from_env()
+
+
+def _is_inside_roi(center_px) -> bool:
+    """ROI 矩形内に重心が含まれるかを判定。ROI 未設定時は常に True。"""
+    if ROI_BOX is None or center_px is None:
+        return True
+    x1, y1, x2, y2 = ROI_BOX
+    cx, cy = center_px
+    if cx is None or cy is None or np.isnan(cx) or np.isnan(cy):
+        return True  # 座標が無い場合はフィルタしない（NaN 補間に委ねる）
+    return (x1 <= cx <= x2) and (y1 <= cy <= y2)
 
 from config import (
     KEYPOINTS,
@@ -29,6 +54,11 @@ from config import (
     INTERPOLATION_MAX_GAP,
     MIN_CONFIDENCE,
     HIND_PAW_MIN_CONF,
+    BODY_LENGTH_MIN_MM,
+    BODY_LENGTH_MAX_MM,
+    MAX_TELEPORT_BODY_LENGTHS,
+    ENABLE_ANATOMICAL_CHECKS,
+    PIXEL_TO_MM_RATIO,
 )
 
 
@@ -59,6 +89,65 @@ def _count_oscillations(history: list, min_amplitude_px: float) -> int:
             count += 1
         last_d = d
     return count
+
+
+def _validate_detection(
+    body_length_px: float,
+    pixel_to_mm_ratio: float,
+    prev_center: tuple | None = None,
+    curr_center: tuple | None = None,
+    body_length_px_for_teleport: float | None = None,
+) -> tuple[bool, str]:
+    """
+    解剖学的整合性チェック — 誤検出除外フィルタ。
+
+    以下の 2 条件のいずれかを満たさない場合は無効（False）とする:
+
+    [A] 体長チェック:
+        neck-to-tail_base 距離（mm）が [BODY_LENGTH_MIN_MM, BODY_LENGTH_MAX_MM] 範囲内か。
+        範囲外は骨格推定の破綻（複数個体の骨格混合など）とみなす。
+
+    [B] テレポート検出:
+        直前フレームからの重心（spine_mid 等）移動量が、体長の MAX_TELEPORT_BODY_LENGTHS 倍を
+        超える場合、物理的に不可能な動きとして除外する。
+        （注: 補間後のデータには適用しないこと — 補間座標は滑らかなため誤除外の原因となる）
+
+    Parameters
+    ----------
+    body_length_px              : neck-to-tail_base のピクセル距離
+    pixel_to_mm_ratio           : mm/px キャリブレーション値
+    prev_center                 : 前フレームの重心座標 (x, y) px, または None
+    curr_center                 : 現フレームの重心座標 (x, y) px, または None
+    body_length_px_for_teleport : テレポート判定に使う体長 (px)。None なら body_length_px 使用
+
+    Returns
+    -------
+    (is_valid: bool, reason: str)
+    """
+    if not ENABLE_ANATOMICAL_CHECKS:
+        return True, "checks_disabled"
+
+    # [A] 体長チェック（mm 換算）
+    if not np.isnan(body_length_px):
+        body_mm = body_length_px * pixel_to_mm_ratio
+        if body_mm < BODY_LENGTH_MIN_MM:
+            return False, f"body_too_short ({body_mm:.1f} mm < {BODY_LENGTH_MIN_MM} mm)"
+        if body_mm > BODY_LENGTH_MAX_MM:
+            return False, f"body_too_long ({body_mm:.1f} mm > {BODY_LENGTH_MAX_MM} mm)"
+
+    # [B] テレポートチェック
+    if prev_center is not None and curr_center is not None:
+        ref_len = body_length_px_for_teleport if body_length_px_for_teleport is not None else body_length_px
+        if not np.isnan(ref_len) and ref_len > 0:
+            dx = curr_center[0] - prev_center[0]
+            dy = curr_center[1] - prev_center[1]
+            move_px = float(np.sqrt(dx**2 + dy**2))
+            max_move_px = ref_len * MAX_TELEPORT_BODY_LENGTHS
+            if move_px > max_move_px:
+                return False, (f"teleport ({move_px:.1f} px > {max_move_px:.1f} px "
+                               f"= body_len × {MAX_TELEPORT_BODY_LENGTHS})")
+
+    return True, "ok"
 
 
 def _compute_scratch_prob(speed_mm_s: float, dist_mm: float, osc: int,
@@ -232,6 +321,9 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
         x_hist_R, y_hist_R = [], []
         vel_L_buf = deque(maxlen=SCRATCH_VELOCITY_SMOOTH_FRAMES)  # [4]
         vel_R_buf = deque(maxlen=SCRATCH_VELOCITY_SMOOTH_FRAMES)  # [4]
+        # テレポート検出用: 前フレームの重心座標 (neck と spine_mid の中点)
+        prev_center_px: tuple | None = None
+        prev_body_len_px: float = np.nan
 
         for idx in indices:
             row = sorted_grp.loc[idx]
@@ -248,6 +340,16 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
             tail_x,   tail_y   = get_xy("tail_base")
             hind_l_x, hind_l_y = get_xy("left_hind_paw")
             hind_r_x, hind_r_y = get_xy("right_hind_paw")
+
+            # ── [解剖学チェック] 体長・テレポート検出 ──────────────────────────
+            # 現フレームの重心 = neck と spine_mid の中点（両方が有効な場合のみ）
+            curr_center_px: tuple | None = None
+            if not (np.isnan(neck_x) or np.isnan(neck_y) or
+                    np.isnan(row.get("spine_mid_x", np.nan)) or np.isnan(row.get("spine_mid_y", np.nan))):
+                curr_center_px = (
+                    (neck_x + row.get("spine_mid_x", neck_x)) / 2.0,
+                    (neck_y + row.get("spine_mid_y", neck_y)) / 2.0,
+                )
 
             # ── A. 距離特徴量 (px) ───────────────────────────────────────────
             body_length_px    = compute_distance(neck_x,   neck_y,   tail_x,   tail_y)
@@ -318,6 +420,43 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
             osc_y_R = _count_oscillations(y_hist_R, SCRATCH_MIN_OSC_AMPLITUDE_PX)
             osc_L   = max(osc_x_L, osc_y_L)
             osc_R   = max(osc_x_R, osc_y_R)
+
+            # ── [ROI チェック] 関心領域外の検出は判定対象外 ───────────────────
+            # ROI 未設定時は常に通過。設定時は重心 (curr_center_px) が矩形内かを評価。
+            roi_ok = _is_inside_roi(curr_center_px)
+
+            # ── [解剖学チェック] 有効性検証 ────────────────────────────────────
+            is_valid, invalid_reason = _validate_detection(
+                body_length_px=body_length_px,
+                pixel_to_mm_ratio=pixel_to_mm_ratio,
+                prev_center=prev_center_px,
+                curr_center=curr_center_px,
+                body_length_px_for_teleport=prev_body_len_px,
+            )
+            if not roi_ok:
+                is_valid = False
+                invalid_reason = "outside_roi"
+            if not is_valid:
+                # 無効フレームは scratch_flag=0, prob=0 として扱い、速度バッファも更新しない
+                # 座標自体は NaN にしない（視覚化には使用するが、判定からは除外）
+                feats["scratch_flag"].append(0.0)
+                feats["scratch_prob_L"].append(0.0)
+                feats["scratch_prob_R"].append(0.0)
+                feats["scratch_prob"].append(0.0)
+                for col in feature_cols:
+                    if col not in ("scratch_flag", "scratch_prob_L", "scratch_prob_R", "scratch_prob"):
+                        feats[col].append(np.nan)
+                # テレポート等では前フレーム座標を引き継がない（追跡断絶とみなす）
+                if "teleport" in invalid_reason:
+                    prev_x_L, prev_y_L, prev_f_L = None, None, None
+                    prev_x_R, prev_y_R, prev_f_R = None, None, None
+                    prev_center_px = None
+                    prev_body_len_px = np.nan
+                continue  # 次のフレームへ
+
+            # 次フレームのテレポート検出のために現フレーム情報を保存
+            prev_center_px = curr_center_px
+            prev_body_len_px = body_length_px if not np.isnan(body_length_px) else prev_body_len_px
 
             # ── F. [1][3] スクラッチ判定（mm 単位・連続スコア） ─────────────
             prob_L = _compute_scratch_prob(
