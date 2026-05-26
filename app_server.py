@@ -68,6 +68,13 @@ class AnalysisRequest(BaseModel):
     dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
     dlc_pose_model: Optional[str] = "hrnet_w32"
 
+    # ── フェーズ1 初期化確認モード ─────────────────────────────────────────
+    # preview_only=True の場合、動画冒頭のみ解析して _preview.json を出力する。
+    # confirmed_mapping: フロントエンドで確認済みのマッピング JSON 文字列。
+    preview_only: bool = False
+    preview_duration_s: float = 300.0  # 5分 = 300秒
+    confirmed_mapping: Optional[str] = None  # JSON文字列: {"track_0": 1, ...}
+
     model_config = {
         "protected_namespaces": ()
     }
@@ -352,6 +359,12 @@ def run_pipeline_task(task_id: str, req: AnalysisRequest):
         if req.dlc_pose_model:
             cmd.extend(["--dlc-pose-model", req.dlc_pose_model])
 
+    # ── フェーズ1 初期化確認モード引数 ──────────────────────────────────────
+    if req.preview_only:
+        cmd.extend(["--preview-only", "--preview-duration", str(req.preview_duration_s)])
+    if req.confirmed_mapping:
+        cmd.extend(["--confirmed-mapping", req.confirmed_mapping])
+
     TASKS_DB[task_id]["log"] += f"[Server] 解析プロセスを開始します...\n[Server] コマンド: {' '.join(cmd)}\n\n"
     TASKS_DB[task_id]["log"] += "[Progress: 5%]\n"
     save_tasks_db(TASKS_DB)
@@ -384,7 +397,13 @@ def run_pipeline_task(task_id: str, req: AnalysisRequest):
             
             # 各パイプラインステップに応じた進捗率を自動挿入
             progress_changed = False
-            if "[Step 1]" in line or "カラーIDの自動アライメント" in line:
+            if "[Preview Mode]" in line or "初期化確認用プレビュー" in line:
+                TASKS_DB[task_id]["log"] += "[Progress: 20%]\n"
+                progress_changed = True
+            elif "[Preview] プレビューJSON" in line:
+                TASKS_DB[task_id]["log"] += "[Progress: 95%]\n"
+                progress_changed = True
+            elif "[Step 1]" in line or "カラーIDの自動アライメント" in line:
                 TASKS_DB[task_id]["log"] += "[Progress: 40%]\n"
                 progress_changed = True
             elif "[Step 2]" in line or "特徴量抽出" in line:
@@ -454,7 +473,8 @@ async def start_analysis(req: AnalysisRequest, background_tasks: BackgroundTasks
         "status": "pending",
         "video": req.video_path,
         "log": "",
-        "warning": ""
+        "warning": "",
+        "task_type": "preview" if req.preview_only else "analysis",
     }
     save_tasks_db(TASKS_DB)
     
@@ -477,19 +497,29 @@ async def get_task_status(task_id: str):
         
     task_info = TASKS_DB[task_id]
     
-    # 完了時の出力CSVのファイルパスを自動特定
+    # 完了時の出力ファイルパスを自動特定（タスク種別で分岐）
     result_files = {}
     if task_info["status"] == "completed":
         video_basename = os.path.splitext(os.path.basename(task_info["video"]))[0]
-        frame_csv = f"/outputs/{video_basename}_frame_labels.csv"
-        bouts_csv = f"/outputs/{video_basename}_bouts.csv"
-        
-        # 実際にサーバー上に存在するか確認
-        if os.path.exists(os.path.join("outputs", f"{video_basename}_frame_labels.csv")):
-            result_files = {
-                "frame_labels_url": frame_csv,
-                "bouts_url": bouts_csv
-            }
+        task_type = task_info.get("task_type", "analysis")
+
+        if task_type == "preview":
+            # プレビューモード: _preview.json を返す
+            preview_json = os.path.join("outputs", f"{video_basename}_preview.json")
+            if os.path.exists(preview_json):
+                result_files = {
+                    "preview_data_url": f"/api/preview_data/{video_basename}",
+                    "video_name": video_basename,
+                }
+        else:
+            # 本解析: frame_labels.csv と bouts.csv を返す
+            frame_csv = f"/outputs/{video_basename}_frame_labels.csv"
+            bouts_csv = f"/outputs/{video_basename}_bouts.csv"
+            if os.path.exists(os.path.join("outputs", f"{video_basename}_frame_labels.csv")):
+                result_files = {
+                    "frame_labels_url": frame_csv,
+                    "bouts_url": bouts_csv
+                }
             
     return {
         "task_id": task_id,
@@ -499,6 +529,112 @@ async def get_task_status(task_id: str):
         "log_full": task_info["log"],
         "results": result_files
     }
+
+# --- 4. フェーズ1 初期化確認モード API ---
+
+@app.get("/api/preview_data/{video_name}")
+async def get_preview_data(video_name: str):
+    """
+    指定動画のプレビューJSONを返す。
+    pipeline.py --preview-only で生成された {video_name}_preview.json を配信する。
+    """
+    preview_path = os.path.join("outputs", f"{video_name}_preview.json")
+    if not os.path.exists(preview_path):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"プレビューデータが見つかりません: {preview_path}\n"
+                "先に /api/analyze (preview_only=true) でプレビュー解析を実行してください。"
+            )
+        )
+    return FileResponse(preview_path, media_type="application/json")
+
+
+class ConfirmIdsRequest(BaseModel):
+    """
+    フロントエンドでの初期化確認完了後に送信されるリクエスト。
+    研究者が確認済みの track→mouse_id マッピングと本解析の設定を含む。
+    """
+    video_path: str
+    engine: str = "yolov8"
+    model_path: Optional[str] = None
+    fps: Optional[int] = None
+    px_to_mm: float = 0.25
+    mice_count: int = 0
+    roi_x1: Optional[int] = None
+    roi_y1: Optional[int] = None
+    roi_x2: Optional[int] = None
+    roi_y2: Optional[int] = None
+    dlc_superanimal: Optional[str] = "superanimal_topviewmouse"
+    dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
+    dlc_pose_model: Optional[str] = "hrnet_w32"
+    # 研究者確認済みのマッピング: {"track_0": 1, "track_1": 2, ...}
+    confirmed_mapping: dict
+
+    model_config = {"protected_namespaces": ()}
+
+
+@app.post("/api/confirm_ids")
+async def confirm_ids_and_analyze(req: ConfirmIdsRequest, background_tasks: BackgroundTasks):
+    """
+    フロントエンドでの初期化確認完了後に本解析を開始する。
+    confirmed_mapping に研究者が割り当てたマッピングが含まれており、
+    カラーID自動分類をスキップしてこの値を使用する。
+    """
+    # 動画ファイルの存在確認
+    resolved_path = None
+    for candidate in [req.video_path,
+                       os.path.basename(req.video_path),
+                       os.path.join(os.getcwd(), os.path.basename(req.video_path))]:
+        if os.path.exists(candidate):
+            resolved_path = candidate
+            break
+
+    if resolved_path is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"動画ファイルが見つかりません: {req.video_path}"
+        )
+
+    # AnalysisRequest に変換（confirmed_mapping を JSON 文字列として渡す）
+    analysis_req = AnalysisRequest(
+        video_path=resolved_path,
+        engine=req.engine,
+        model_path=req.model_path,
+        fps=req.fps,
+        px_to_mm=req.px_to_mm,
+        mice_count=req.mice_count,
+        roi_x1=req.roi_x1,
+        roi_y1=req.roi_y1,
+        roi_x2=req.roi_x2,
+        roi_y2=req.roi_y2,
+        dlc_superanimal=req.dlc_superanimal,
+        dlc_detector=req.dlc_detector,
+        dlc_pose_model=req.dlc_pose_model,
+        confirmed_mapping=json.dumps(req.confirmed_mapping, ensure_ascii=False),
+    )
+
+    task_id = str(uuid.uuid4())
+    TASKS_DB[task_id] = {
+        "status": "pending",
+        "video": resolved_path,
+        "log": (
+            "[Server] 確認済みIDマッピングで本解析を開始します。\n"
+            f"[Server] マッピング: {req.confirmed_mapping}\n"
+        ),
+        "warning": "",
+        "task_type": "analysis",
+    }
+    save_tasks_db(TASKS_DB)
+
+    background_tasks.add_task(run_pipeline_task, task_id, analysis_req)
+
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "message": "確認済みIDマッピングで本解析が開始されました。/api/status/{task_id} で進捗を確認できます。",
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

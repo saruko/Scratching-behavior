@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from collections import Counter, defaultdict
+from typing import Dict, Optional
 from config import MOUSE_COLORS, RED_WRAP_LOWER, RED_WRAP_UPPER, MAX_MICE_LIMIT, ACTIVE_MOUSE_IDS
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
@@ -199,7 +200,8 @@ def _fallback_assign_by_body_size(
 # ── Batch assignment for a full video ────────────────────────────────────────
 
 def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
-                     mice_count: int = 0) -> pd.DataFrame:
+                     mice_count: int = 0,
+                     initial_mapping: Optional[Dict[str, int]] = None) -> pd.DataFrame:
     """
     動画の全フレームをスキャンし、スライディング窓を用いて各トラックのカラーID確率推移を評価します。
     急激な色の変化（Identity Swap / 混同）を検知した時点で、そのトラックを自動分割し、
@@ -220,14 +222,46 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
 
     Parameters
     ----------
-    video_path  : ソース動画のパス (.mp4 / .avi)
-    pose_df     : load_sleap_h5() でロードされたDataFrame
-    mice_count  : 期待個体数 (0 = 自動検出)
+    video_path      : ソース動画のパス (.mp4 / .avi)
+    pose_df         : load_sleap_h5() でロードされたDataFrame
+    mice_count      : 期待個体数 (0 = 自動検出)
+    initial_mapping : 研究者確認済みの track→mouse_id マッピング辞書。
+                      例: {"track_0": 1, "track_1": 2, ...}
+                      指定した場合はカラーID自動分類をスキップしてこの値を使用する。
 
     Returns
     -------
     pose_df with updated 'track' columns and a new 'mouse_id' column (int or NaN)
     """
+    # ── 確認済みマッピングによるショートカット ──────────────────────────────
+    # フロントエンドで研究者が確認・承認した track→mouse_id マッピングが提供された場合、
+    # カラーHSV自動分類をスキップして直接 mouse_id を割り当てる。
+    # これにより初期フレームでの人による確認結果が全フレームに反映される。
+    if initial_mapping is not None:
+        print("[color_id] [Info] 確認済みIDマッピングが提供されました。カラーID自動分類をスキップします。")
+        result = pose_df.copy()
+        result["mouse_id"] = result["track"].map(
+            lambda t: initial_mapping.get(str(t), None)
+        )
+        resolved = int(result["mouse_id"].notna().sum())
+        unresolved = int(result["mouse_id"].isna().sum())
+        print(f"[color_id] [Info] マッピング結果: {resolved} 行で割り当て済み, {unresolved} 行で未解決")
+        if unresolved > 0:
+            print("[color_id] [Warning] 一部のトラックでマッピングが適用されませんでした。"
+                  "トラック名が不一致の可能性があります。")
+            # 未解決分は連番でフォールバック割り当て
+            used_ids = set(v for v in initial_mapping.values())
+            unmapped_tracks = result[result["mouse_id"].isna()]["track"].unique()
+            next_id = 1
+            for track in sorted(unmapped_tracks):
+                while next_id in used_ids:
+                    next_id += 1
+                result.loc[result["track"] == track, "mouse_id"] = next_id
+                used_ids.add(next_id)
+                print(f"[color_id] [Info] 未マッピングトラック {track} → mouse_id={next_id} に仮割り当て")
+        result["mouse_id"] = result["mouse_id"].astype("Int64")
+        return result
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         video_ext = os.path.splitext(video_path)[1].lower()

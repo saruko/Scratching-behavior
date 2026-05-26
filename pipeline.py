@@ -10,6 +10,7 @@ Mouse Scratch Detection System — Main Processing Pipeline (Revised)
 
 import os
 import sys
+import json
 import argparse
 import numpy as np
 import pandas as pd
@@ -159,6 +160,105 @@ def long_to_wide_format(long_df: pd.DataFrame) -> pd.DataFrame:
     return wide_df
 
 
+def build_preview_json(
+    pose_df: pd.DataFrame,
+    fps: float,
+    video_path: str,
+    preview_duration_s: float,
+    sample_interval_s: float = 1.0,
+) -> dict:
+    """
+    初期化確認モード用プレビュー JSON を生成する。
+
+    動画冒頭 preview_duration_s 秒分のポーズデータについて、
+    sample_interval_s 秒ごとにサンプリングし、各検出個体の
+    バウンディングボックス（キーポイントの凸包 + パディング）と
+    キーポイント座標をまとめて返す。
+
+    フロントエンドはこの JSON をもとにシークバーを提供し、
+    研究者が任意のフレームで各マウスに ID を割り当てて確認できる。
+    """
+    BBOX_PAD = 20  # バウンディングボックスのパディング (px)
+
+    # 動画の実解像度を取得（フロントエンドでの座標変換に使用）
+    video_w, video_h = 1920, 1080
+    try:
+        import cv2 as _cv2
+        cap = _cv2.VideoCapture(video_path)
+        if cap.isOpened():
+            video_w = int(cap.get(_cv2.CAP_PROP_WIDTH))
+            video_h = int(cap.get(_cv2.CAP_PROP_HEIGHT))
+            cap.release()
+    except Exception:
+        pass
+
+    max_frame = int(preview_duration_s * fps)
+    step = max(1, int(sample_interval_s * fps))
+    sampled_frames = list(range(0, max_frame + 1, step))
+
+    frames_dict = {}
+    for frame_idx in sampled_frames:
+        rows = pose_df[pose_df["frame_idx"] == frame_idx]
+        if rows.empty:
+            continue
+
+        detections = []
+        for _, row in rows.iterrows():
+            # キーポイント座標を取得（NaN を除外）
+            xs = [float(row[f"{kp}_x"]) for kp in KEYPOINTS
+                  if f"{kp}_x" in row.index and not pd.isna(row.get(f"{kp}_x"))]
+            ys = [float(row[f"{kp}_y"]) for kp in KEYPOINTS
+                  if f"{kp}_y" in row.index and not pd.isna(row.get(f"{kp}_y"))]
+
+            # バウンディングボックス：全キーポイントを囲む最小矩形 + パディング
+            bbox = None
+            if len(xs) >= 2 and len(ys) >= 2:
+                bbox = [
+                    round(max(0.0, min(xs) - BBOX_PAD), 1),
+                    round(max(0.0, min(ys) - BBOX_PAD), 1),
+                    round(max(xs) + BBOX_PAD, 1),
+                    round(max(ys) + BBOX_PAD, 1),
+                ]
+
+            # キーポイント辞書（x, y, conf）
+            kps_out = {}
+            for kp in KEYPOINTS:
+                xcol, ycol, ccol = f"{kp}_x", f"{kp}_y", f"{kp}_conf"
+                if xcol in row.index and not pd.isna(row.get(xcol)):
+                    kps_out[kp] = {
+                        "x": round(float(row[xcol]), 1),
+                        "y": round(float(row[ycol]), 1),
+                        "conf": round(float(row[ccol]) if (ccol in row.index and not pd.isna(row.get(ccol))) else 0.5, 3),
+                    }
+
+            mouse_id = None
+            if "mouse_id" in row.index and not pd.isna(row.get("mouse_id")):
+                mouse_id = int(row["mouse_id"])
+
+            detections.append({
+                "track": str(row["track"]),
+                "mouse_id": mouse_id,          # カラーID自動推定値（参考）
+                "bbox": bbox,
+                "keypoints": kps_out,
+            })
+
+        frames_dict[str(frame_idx)] = {
+            "timestamp_s": round(frame_idx / fps, 3),
+            "detections": detections,
+        }
+
+    return {
+        "video": os.path.basename(video_path),
+        "fps": round(fps, 4),
+        "video_width": video_w,
+        "video_height": video_h,
+        "preview_duration_s": preview_duration_s,
+        "sample_interval_s": sample_interval_s,
+        "sampled_frames": sampled_frames,
+        "frames": frames_dict,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Mouse Scratch Detection System — End-to-End Pipeline")
     parser.add_argument("--video", type=str, required=True, help="解析対象の動画ファイルパス (.mp4 / .mov / .avi など OpenCV対応形式)")
@@ -186,6 +286,21 @@ def main():
     parser.add_argument("--roi-y1", type=int, default=None, help="ROI 矩形 左上 Y 座標 (px, 任意)")
     parser.add_argument("--roi-x2", type=int, default=None, help="ROI 矩形 右下 X 座標 (px, 任意)")
     parser.add_argument("--roi-y2", type=int, default=None, help="ROI 矩形 右下 Y 座標 (px, 任意)")
+
+    # ── フェーズ1 初期化確認モード ─────────────────────────────────────────────
+    # --preview-only: 動画冒頭のみ解析してバウンディングボックス付き JSON を出力する。
+    #                 出力後にフロントエンドで研究者が各マウスに ID を割り当て、
+    #                 /api/confirm_ids で本解析を開始する。
+    parser.add_argument("--preview-only", action="store_true",
+                        help="プレビューモード: 最初の --preview-duration 秒のみ解析し、"
+                             "_preview.json を出力して終了する（本解析は実行しない）")
+    parser.add_argument("--preview-duration", type=float, default=300.0,
+                        help="プレビュー解析の長さ（秒）。デフォルト: 300秒（5分）")
+    # --confirmed-mapping: フロントエンドで研究者が確認済みの track→mouse_id マッピング。
+    #                      JSON 文字列形式 {"track_0": 1, "track_1": 2, ...}
+    #                      指定するとカラーID自動分類をスキップしてこのマッピングを使用する。
+    parser.add_argument("--confirmed-mapping", type=str, default=None,
+                        help='研究者確認済み track→mouse_id マッピング (JSON文字列: {"track_0": 1, ...})')
 
     args = parser.parse_args()
 
@@ -268,6 +383,62 @@ def main():
         
     print(f"[pipeline] 初期ロードデータ数: {len(pose_df)} 行")
 
+    # ── フェーズ1: プレビューモード（--preview-only 指定時） ─────────────────
+    # 動画冒頭 preview_duration 秒分のみを解析し、バウンディングボックス付き JSON を
+    # 出力して終了する。フロントエンドで研究者が確認後、/api/confirm_ids で本解析を開始する。
+    if args.preview_only:
+        print(f"\n--- [Preview Mode] 初期化確認用プレビュー生成中 ---")
+        preview_max_frame = int(args.preview_duration * fps)
+        pose_df_preview = pose_df[pose_df["frame_idx"] <= preview_max_frame].copy()
+        print(f"[pipeline] プレビュー対象: 最初 {args.preview_duration:.0f} 秒 "
+              f"({preview_max_frame} フレーム) / {len(pose_df_preview)} 行のポーズデータ")
+
+        # プレビュー用カラーID割り当て（本解析と同一ロジックを最初 N フレームに適用）
+        try:
+            if os.path.exists(args.video):
+                pose_df_preview = color_id.assign_track_ids(
+                    args.video, pose_df_preview, mice_count=args.mice_count
+                )
+            else:
+                pose_df_preview["mouse_id"] = pose_df_preview["track"].map(
+                    lambda t: int(t.split("_")[-1]) + 1 if t.split("_")[-1].isdigit() else 1
+                )
+        except Exception as e:
+            print(f"[pipeline] [Warning] プレビュー用カラーID割り当て中にエラー: {e}")
+            pose_df_preview["mouse_id"] = pose_df_preview["track"].map(
+                lambda t: int(t.split("_")[-1]) + 1 if t.split("_")[-1].isdigit() else 1
+            )
+
+        # バウンディングボックス付きプレビュー JSON を生成・保存
+        video_basename_p = os.path.splitext(os.path.basename(args.video))[0]
+        preview_data = build_preview_json(
+            pose_df_preview, fps, args.video,
+            preview_duration_s=args.preview_duration,
+            sample_interval_s=1.0,  # 1 秒ごとにサンプリング
+        )
+        preview_json_path = os.path.join(args.out_dir, f"{video_basename_p}_preview.json")
+        with open(preview_json_path, "w", encoding="utf-8") as fp:
+            json.dump(preview_data, fp, ensure_ascii=False, separators=(",", ":"))
+
+        print(f"[pipeline] [Preview] プレビューJSON 保存完了: {preview_json_path}")
+        print(f"[pipeline] [Preview] サンプリングフレーム数: {len(preview_data['sampled_frames'])} フレーム "
+              f"(1秒間隔 / 最初 {args.preview_duration:.0f}秒)")
+        print(f"[pipeline] [Preview] フロントエンドで各マウスに ID を割り当て後、/api/confirm_ids を呼び出してください。")
+        print("\n[Preview] プレビュー生成が完了しました。本解析は実行しません。")
+        return  # プレビューモードはここで終了
+
+    # ── 確認済みIDマッピングの解析（--confirmed-mapping 指定時） ──────────────
+    # フロントエンドで研究者が確認したマッピングを JSON 文字列から辞書に変換する。
+    confirmed_mapping = None
+    if args.confirmed_mapping:
+        try:
+            raw_map = json.loads(args.confirmed_mapping)
+            confirmed_mapping = {str(k): int(v) for k, v in raw_map.items()}
+            print(f"[pipeline] [Info] 確認済みIDマッピングを適用します: {confirmed_mapping}")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[pipeline] [Warning] --confirmed-mapping の解析に失敗しました: {e}")
+            print("[pipeline] [Warning] カラーID自動分類にフォールバックします。")
+
     # 2. 動画のカラーIDに基づく個体トラッキング自動アライメント
     print("\n--- [Step 1] カラーIDの自動アライメント実行中 ---")
     try:
@@ -292,8 +463,11 @@ def main():
                 print(f"[pipeline] [Warning] 動画形式 '{video_ext}' は公式テスト済み形式外の可能性がありますが、OpenCVでの読み込みを試みます。")
             if video_ext == '.mov':
                 print(f"[pipeline] [Info] MOV形式を検出しました。OpenCVはMOVをサポートしていますが、H.264コーデックでエンコードされている必要があります。")
-            aligned_df = color_id.assign_track_ids(args.video, pose_df,
-                                                    mice_count=args.mice_count)
+            aligned_df = color_id.assign_track_ids(
+                args.video, pose_df,
+                mice_count=args.mice_count,
+                initial_mapping=confirmed_mapping,
+            )
     except Exception as e:
         print(f"[pipeline] [Error] カラーID割り当て中に予期しないエラーが発生しました: {e}")
         print("[pipeline] トラックIDから暫定IDを割り当てて処理を続行します。")
