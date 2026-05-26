@@ -46,7 +46,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // CSVデータが正常にロードされているか（デモデータを除く）
         hasRealData: false,
+
+        // ── フェーズ1 初期化確認モード ────────────────────────────────────
+        // active: 確認モード中フラグ
+        // step: 'bbox' (バウンディングボックス確認) | 'pose' (ポーズ確認) | null
+        // pipelineConfig: 本解析開始時に再利用するパイプライン設定
+        // previewData: pipeline.py が生成した _preview.json の内容
+        // detectedTracks: プレビューから抽出されたトラックID一覧
+        // confirmedMapping: 研究者が割り当てた track→mouse_id 辞書（visualizer も参照）
+        previewMode: {
+            active: false,
+            step: null,
+            pipelineConfig: null,
+            previewData: null,
+            videoName: null,
+            detectedTracks: [],
+        },
+        confirmedMapping: {},
     };
+    // visualizer.js から参照させるためグローバル公開
+    window.appState = appState;
 
     // --- 2. Initialize Components ---
     const visualizer = new CageVisualizer('cage-canvas');
@@ -1644,12 +1663,35 @@ document.addEventListener('DOMContentLoaded', () => {
         const roiX2 = pipelineRoiX2 && pipelineRoiX2.value !== '' ? parseInt(pipelineRoiX2.value) : null;
         const roiY2 = pipelineRoiY2 && pipelineRoiY2.value !== '' ? parseInt(pipelineRoiY2.value) : null;
 
+        // ── フェーズ1 初期化確認モードのトグル確認 ──────────────────────────
+        const usePreviewMode = document.getElementById('chk-use-preview-mode')?.checked === true;
+        // 本解析開始時に再利用するため、パイプライン設定を保存
+        const pipelineConfig = {
+            videoName, engine, modelPath, calibration, miceCount,
+            dlcSuperanimal, roiX1, roiY1, roiX2, roiY2,
+        };
+
         // 状態を「進行中」へ変更
         btnRunPipeline.disabled = true;
-        btnRunPipeline.textContent = "解析実行中...";
+        btnRunPipeline.textContent = usePreviewMode ? "プレビュー解析中..." : "解析実行中...";
         pipelineStatusPanel.style.display = "block";
-        pipelineStatusPanel.textContent = "[Server] 解析リクエストを送信中...\n";
+        pipelineStatusPanel.textContent = usePreviewMode
+            ? "[Server] プレビュー解析リクエストを送信中 (冒頭5分)...\n"
+            : "[Server] 解析リクエストを送信中...\n";
         pipelineStatusPanel.style.color = "#38BDF8";
+
+        // 確認モード状態を初期化
+        if (usePreviewMode) {
+            appState.previewMode = {
+                active: true,
+                step: null,
+                pipelineConfig,
+                previewData: null,
+                videoName: null,
+                detectedTracks: [],
+            };
+            appState.confirmedMapping = {};
+        }
 
         // 解析進捗バーを開始
         startAnalysisProgressBar();
@@ -1670,7 +1712,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 ...(roiX1 != null && roiY1 != null && roiX2 != null && roiY2 != null
                     ? { roi_x1: roiX1, roi_y1: roiY1, roi_x2: roiX2, roi_y2: roiY2 } : {}),
                 // DLC エンジン時のみ Model Zoo モデル名を渡す (それ以外はサーバ側で無視される)
-                ...(dlcSuperanimal ? { dlc_superanimal: dlcSuperanimal } : {})
+                ...(dlcSuperanimal ? { dlc_superanimal: dlcSuperanimal } : {}),
+                // フェーズ1 初期化確認モードの場合は preview_only を有効化
+                ...(usePreviewMode ? { preview_only: true, preview_duration_s: 300.0 } : {}),
             })
         })
         .then(res => {
@@ -1792,6 +1836,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     clearInterval(appState.pollingInterval);
                     appState.pollingInterval = null;
                     completeAnalysisProgressBar(true);
+
+                    // ── プレビュー完了: 確認モードへ遷移 ──────────────────
+                    if (data.results && data.results.preview_data_url) {
+                        pipelineStatusPanel.textContent += "\n[Server] プレビューデータを受信中...\n";
+                        loadPreviewDataAndEnterConfirmation(
+                            data.results.preview_data_url,
+                            data.results.video_name
+                        );
+                        return;
+                    }
+
                     pipelineStatusPanel.textContent += "\n[Server] 解析データを受信中...\n";
                     try {
                         loadPipelineResults(data.results.frame_labels_url, data.results.bouts_url || null);
@@ -1926,6 +1981,320 @@ document.addEventListener('DOMContentLoaded', () => {
             btnRunPipeline.disabled = false;
             btnRunPipeline.textContent = "解析パイプラインを実行";
         });
+    }
+
+    // =====================================================================
+    // ── フェーズ1 初期化確認モード制御ロジック ──────────────────────────
+    // =====================================================================
+    //
+    // ワークフロー：
+    //   1. ユーザーが「初期化確認モード」チェックボックスを有効化して「解析実行」をクリック
+    //   2. pipeline.py が --preview-only で起動し、冒頭5分のバウンディングボックス JSON を生成
+    //   3. loadPreviewDataAndEnterConfirmation: JSONを取得・確認モードに遷移
+    //   4. enterConfirmationMode: 検出トラックごとのID割当UIを構築し、visualizer を bbox モードに
+    //   5. ユーザーがシークバーで任意時刻に移動しつつ、各トラックに mouse_id を割り当て
+    //   6. 「次へ：ポーズ確認」→ visualizer を pose モードに切替
+    //   7. 「本解析開始」→ /api/confirm_ids にマッピング送信、本解析タスクが起動
+
+    function loadPreviewDataAndEnterConfirmation(previewDataUrl, videoName) {
+        pipelineStatusPanel.textContent += `[Server] プレビューJSON取得中: ${previewDataUrl}\n`;
+        fetch(previewDataUrl)
+            .then(res => {
+                if (!res.ok) throw new Error(`プレビューデータ取得失敗: ${res.statusText}`);
+                return res.json();
+            })
+            .then(previewData => {
+                appState.previewMode.previewData = previewData;
+                appState.previewMode.videoName = videoName;
+                enterConfirmationMode(previewData);
+            })
+            .catch(err => {
+                console.error(err);
+                pipelineStatusPanel.textContent += `\n[Error] プレビューロード失敗: ${err.message}`;
+                pipelineStatusPanel.style.color = "#EF4444";
+                btnRunPipeline.disabled = false;
+                btnRunPipeline.textContent = "解析パイプラインを実行";
+            });
+    }
+
+    function enterConfirmationMode(previewData) {
+        // 検出されたトラック ID 一覧を抽出（出現順を保持）
+        const trackOrder = [];
+        const trackSuggestedIds = {};
+        for (const frameKey of Object.keys(previewData.frames || {})) {
+            const dets = previewData.frames[frameKey].detections || [];
+            for (const det of dets) {
+                if (!trackOrder.includes(det.track)) {
+                    trackOrder.push(det.track);
+                    if (det.mouse_id != null) trackSuggestedIds[det.track] = det.mouse_id;
+                }
+            }
+        }
+        appState.previewMode.detectedTracks = trackOrder;
+        appState.previewMode.step = 'bbox';
+        appState.previewMode.active = true;
+
+        // 自動推定されたカラーIDをデフォルトとして適用
+        appState.confirmedMapping = { ...trackSuggestedIds };
+
+        // visualizer をプレビューモード（bbox）に設定
+        const sampledFrames = (previewData.sampled_frames || []).slice().sort((a, b) => a - b);
+        visualizer.setConfirmationMode('bbox', previewData.frames, sampledFrames);
+
+        // 動画解像度を appState に反映（CSVが無くても canvas を動画にフィット可能）
+        if (previewData.video_width && previewData.video_height) {
+            appState.videoW = previewData.video_width;
+            appState.videoH = previewData.video_height;
+            appState.hasRealData = true;
+            if (typeof resizeCanvasToVideo === 'function') resizeCanvasToVideo();
+        }
+
+        // フレーム数/FPS を appState に反映してシークバー範囲を冒頭5分に制限
+        const previewMaxFrame = Math.floor((previewData.preview_duration_s || 300) * (previewData.fps || 30));
+        appState.data = appState.data || {};
+        appState.data.fps = previewData.fps || 30;
+        appState.data.numFrames = previewMaxFrame + 1;
+        appState.data.frames = [];
+        for (let f = 0; f <= previewMaxFrame; f++) {
+            appState.data.frames.push({ frame_idx: f, mice: {} });
+        }
+        scrubSlider.max = previewMaxFrame;
+        scrubSlider.value = 0;
+        appState.currentFrame = 0;
+
+        // 確認パネル表示
+        const panel = document.getElementById('confirmation-panel');
+        panel.style.display = 'flex';
+        updateConfirmationStepLabel();
+        rebuildConfirmationMappingList();
+        updateConfirmationProgress();
+        updateConfirmationNextButton();
+        updateUIForFrame();
+
+        // ステータス更新
+        pipelineStatusPanel.textContent += `[Confirm] 検出されたトラック数: ${trackOrder.length}\n`;
+        pipelineStatusPanel.textContent += `[Confirm] シークバーで任意時刻を確認しながら、各トラックに正しい mouse_id を割り当ててください。\n`;
+
+        // メイン解析ボタンを無効化（確認完了まで）
+        btnRunPipeline.disabled = true;
+        btnRunPipeline.textContent = "確認モード中...";
+    }
+
+    function rebuildConfirmationMappingList() {
+        const listDiv = document.getElementById('confirmation-mapping-list');
+        if (!listDiv) return;
+        listDiv.innerHTML = '';
+
+        const palette = (typeof MOUSE_COLOR_PALETTE !== 'undefined') ? MOUSE_COLOR_PALETTE : {};
+        const maxMice = (typeof MAX_MICE_LIMIT !== 'undefined') ? MAX_MICE_LIMIT : 8;
+
+        for (const track of appState.previewMode.detectedTracks) {
+            const currentId = appState.confirmedMapping[track] || '';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px; background:rgba(255,255,255,0.03); border-radius:3px;';
+
+            // カラー色サンプル
+            const sample = document.createElement('div');
+            const colorHex = palette[currentId]?.hex || '#666';
+            sample.style.cssText = `width:14px; height:14px; border-radius:3px; background:${colorHex}; border:1px solid rgba(255,255,255,0.3); flex-shrink:0;`;
+            row.appendChild(sample);
+
+            // トラック名
+            const trackLabel = document.createElement('span');
+            trackLabel.style.cssText = 'font-size:0.7rem; color:var(--text-secondary); flex: 1; font-family: monospace;';
+            trackLabel.textContent = track;
+            row.appendChild(trackLabel);
+
+            // ID セレクト
+            const sel = document.createElement('select');
+            sel.style.cssText = 'font-size:0.7rem; background:rgba(0,0,0,0.4); color:var(--text-primary); border:1px solid var(--border-color); border-radius:3px; padding:2px 4px;';
+            const emptyOpt = document.createElement('option');
+            emptyOpt.value = ''; emptyOpt.textContent = '— 未割当 —';
+            sel.appendChild(emptyOpt);
+            for (let i = 1; i <= maxMice; i++) {
+                const opt = document.createElement('option');
+                opt.value = i;
+                const name = palette[i]?.name || `M${i}`;
+                opt.textContent = `Mouse ${i} (${name})`;
+                if (parseInt(currentId) === i) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            sel.addEventListener('change', (e) => {
+                const v = e.target.value;
+                if (v === '') {
+                    delete appState.confirmedMapping[track];
+                } else {
+                    appState.confirmedMapping[track] = parseInt(v);
+                }
+                // 色サンプル更新
+                sample.style.background = palette[appState.confirmedMapping[track]]?.hex || '#666';
+                updateConfirmationProgress();
+                updateConfirmationNextButton();
+                // 即座にビジュアルを更新
+                updateUIForFrame();
+            });
+            row.appendChild(sel);
+
+            listDiv.appendChild(row);
+        }
+    }
+
+    function updateConfirmationStepLabel() {
+        const lbl = document.getElementById('confirmation-step-label');
+        const nextBtn = document.getElementById('btn-confirmation-next');
+        if (!lbl || !nextBtn) return;
+        if (appState.previewMode.step === 'bbox') {
+            lbl.textContent = 'Step 1/2: バウンディングボックスの確認';
+            nextBtn.textContent = '次へ：ポーズ確認 →';
+        } else if (appState.previewMode.step === 'pose') {
+            lbl.textContent = 'Step 2/2: ポーズ推定の確認';
+            nextBtn.textContent = '本解析を開始 ▶';
+        }
+    }
+
+    function updateConfirmationProgress() {
+        const total = appState.previewMode.detectedTracks.length;
+        const assigned = Object.keys(appState.confirmedMapping).length;
+        const lbl = document.getElementById('confirmation-progress-label');
+        if (lbl) lbl.textContent = `${assigned} / ${total} トラックを割り当て済み`;
+    }
+
+    function updateConfirmationNextButton() {
+        const total = appState.previewMode.detectedTracks.length;
+        const assigned = Object.keys(appState.confirmedMapping).length;
+        // 重複IDがあるとアサインメントが不正なため拒否
+        const assignedIds = Object.values(appState.confirmedMapping);
+        const hasDuplicate = new Set(assignedIds).size !== assignedIds.length;
+        const nextBtn = document.getElementById('btn-confirmation-next');
+        if (!nextBtn) return;
+        nextBtn.disabled = (assigned !== total) || hasDuplicate;
+        nextBtn.title = hasDuplicate
+            ? '同じ mouse_id を複数のトラックに割り当てることはできません'
+            : (assigned !== total ? '全トラックにIDを割り当ててください' : '');
+    }
+
+    function handleConfirmationNext() {
+        if (appState.previewMode.step === 'bbox') {
+            // Step 1 → Step 2: bbox 確認完了、pose 表示モードへ
+            appState.previewMode.step = 'pose';
+            visualizer.setConfirmationMode('pose', appState.previewMode.previewData.frames,
+                                            (appState.previewMode.previewData.sampled_frames || []).slice().sort((a, b) => a - b));
+            // pose モードでは appState.data.frames を previewData から再構築（キーポイント表示用）
+            buildFramesFromPreviewData(appState.previewMode.previewData);
+            updateConfirmationStepLabel();
+            updateUIForFrame();
+        } else if (appState.previewMode.step === 'pose') {
+            // Step 2 完了 → 本解析開始
+            submitConfirmedMappingAndRunFullAnalysis();
+        }
+    }
+
+    /**
+     * プレビュー JSON から appState.data.frames を再構築する。
+     * ポーズ確認 (Step 2) で、サンプリング済みフレームに対しては実キーポイントを描画する。
+     * サンプル間のフレームは空のまま（visualizer 側で bbox を描く）。
+     */
+    function buildFramesFromPreviewData(previewData) {
+        const numFrames = appState.data.numFrames;
+        const framesArray = [];
+        for (let f = 0; f < numFrames; f++) {
+            framesArray.push({ frame_idx: f, mice: {} });
+        }
+        for (const [frameKey, frameEntry] of Object.entries(previewData.frames || {})) {
+            const f = parseInt(frameKey);
+            if (f >= numFrames) continue;
+            for (const det of (frameEntry.detections || [])) {
+                const assignedId = appState.confirmedMapping[det.track];
+                if (!assignedId) continue;
+                framesArray[f].mice[assignedId] = {
+                    keypoints: det.keypoints,
+                    scratch_flag: 0,
+                    scratch_prob: 0.0,
+                    features: {},
+                    disabled: false,
+                };
+            }
+        }
+        appState.data.frames = framesArray;
+        // appState.miceIds を更新（appState.data.mice = appState.confirmedMapping の値域）
+        const ids = [...new Set(Object.values(appState.confirmedMapping))].sort((a, b) => a - b);
+        if (ids.length > 0) appState.miceIds = ids;
+    }
+
+    function submitConfirmedMappingAndRunFullAnalysis() {
+        const cfg = appState.previewMode.pipelineConfig;
+        if (!cfg) {
+            alert("⚠️ パイプライン設定が見つかりません。確認モードをキャンセルしてやり直してください。");
+            return;
+        }
+
+        const nextBtn = document.getElementById('btn-confirmation-next');
+        if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = '本解析投入中...'; }
+        pipelineStatusPanel.textContent += `\n[Confirm] 確認済みマッピング: ${JSON.stringify(appState.confirmedMapping)}\n`;
+        pipelineStatusPanel.textContent += `[Confirm] /api/confirm_ids へ本解析リクエストを送信中...\n`;
+
+        const body = {
+            video_path: cfg.videoName,
+            engine: cfg.engine,
+            model_path: cfg.modelPath,
+            px_to_mm: cfg.calibration,
+            mice_count: cfg.miceCount,
+            confirmed_mapping: appState.confirmedMapping,
+            ...(cfg.roiX1 != null && cfg.roiY1 != null && cfg.roiX2 != null && cfg.roiY2 != null
+                ? { roi_x1: cfg.roiX1, roi_y1: cfg.roiY1, roi_x2: cfg.roiX2, roi_y2: cfg.roiY2 } : {}),
+            ...(cfg.dlcSuperanimal ? { dlc_superanimal: cfg.dlcSuperanimal } : {}),
+        };
+
+        fetch("/api/confirm_ids", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        })
+        .then(res => {
+            if (!res.ok) return res.json().then(e => { throw new Error(e.detail || "確認APIエラー"); });
+            return res.json();
+        })
+        .then(data => {
+            pipelineStatusPanel.textContent += `[Server] 本解析タスク登録: ID=${data.task_id}\n`;
+            // 確認パネルを閉じて、visualizer を通常モードに戻す
+            exitConfirmationMode();
+            // 通常の解析進捗ポーリングへ移行
+            startAnalysisProgressBar();
+            btnRunPipeline.disabled = true;
+            btnRunPipeline.textContent = "本解析実行中...";
+            pollAnalysisStatus(data.task_id);
+        })
+        .catch(err => {
+            console.error(err);
+            pipelineStatusPanel.textContent += `\n[Error] 本解析開始失敗: ${err.message}`;
+            pipelineStatusPanel.style.color = "#EF4444";
+            if (nextBtn) { nextBtn.disabled = false; nextBtn.textContent = '本解析を開始 ▶'; }
+        });
+    }
+
+    function exitConfirmationMode() {
+        appState.previewMode.active = false;
+        appState.previewMode.step = null;
+        visualizer.setConfirmationMode(null);
+        const panel = document.getElementById('confirmation-panel');
+        if (panel) panel.style.display = 'none';
+    }
+
+    // 確認パネルのアクションボタンを配線
+    const btnConfirmationCancel = document.getElementById('btn-confirmation-cancel');
+    const btnConfirmationNext = document.getElementById('btn-confirmation-next');
+    if (btnConfirmationCancel) {
+        btnConfirmationCancel.addEventListener('click', () => {
+            if (confirm('確認モードをキャンセルしますか？プレビュー結果は破棄されます。')) {
+                exitConfirmationMode();
+                btnRunPipeline.disabled = false;
+                btnRunPipeline.textContent = "解析パイプラインを実行";
+                pipelineStatusPanel.textContent += "\n[Confirm] 確認モードがキャンセルされました。\n";
+            }
+        });
+    }
+    if (btnConfirmationNext) {
+        btnConfirmationNext.addEventListener('click', handleConfirmationNext);
     }
 
     // --- 12.6 Dynamic Server Result Loader bindings (NEW) ---

@@ -59,8 +59,55 @@ class CageVisualizer {
         this.currentFrameData = null;
         this.selectedMouseId = null;
 
+        // ── フェーズ1 初期化確認モード ─────────────────────────────────────
+        // 'bbox': バウンディングボックスのみ強調（骨格はうっすら）
+        // 'pose': 骨格を強調（bbox はうっすら）
+        // null  : 通常モード（bbox 非表示）
+        this.confirmationMode = null;
+        this.previewFrames = null;     // プレビューJSON の frames 辞書
+        this.previewSampledFrames = null; // サンプリングされたフレーム番号配列
+
         // Bind interactive mouse events
         this.initMouseEvents();
+    }
+
+    /**
+     * 確認モード設定。
+     * mode: 'bbox' | 'pose' | null
+     * previewFrames: pipeline.py が出力した _preview.json の frames 辞書
+     * sampledFrames: サンプリング対象のフレーム番号配列（昇順）
+     */
+    setConfirmationMode(mode, previewFrames = null, sampledFrames = null) {
+        this.confirmationMode = mode;
+        this.previewFrames = previewFrames;
+        this.previewSampledFrames = sampledFrames;
+    }
+
+    /**
+     * 任意フレームに最も近い「サンプリング済みフレーム」のバウンディングボックス情報を返す。
+     * プレビューは 1 秒間隔のサンプリングのため、ユーザーがシークしたフレームに対して
+     * 最近接のサンプルを採用する（前方サンプルを優先：手前のフレームを基準にする方が
+     * 検出と表示のずれが視認しやすい）。
+     */
+    _lookupPreviewDetections(frameIdx) {
+        if (!this.previewFrames || !this.previewSampledFrames || this.previewSampledFrames.length === 0) {
+            return null;
+        }
+        // 二分探索で最近接の前方サンプルを取得
+        const arr = this.previewSampledFrames;
+        let lo = 0, hi = arr.length - 1;
+        let best = arr[0];
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (arr[mid] <= frameIdx) {
+                best = arr[mid];
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        const entry = this.previewFrames[String(best)];
+        return entry ? { frame: best, detections: entry.detections } : null;
     }
 
     /**
@@ -248,16 +295,103 @@ class CageVisualizer {
             ctx.strokeRect(10, 10, w - 20, h - 20);
         }
 
-        // 2. Draw each mouse (動的マウス数対応: frameData.mice のエントリを全て描画)
-        for (const [id, mouseData] of Object.entries(frameData.mice)) {
-            const mId = parseInt(id);
-            const isSelected = mId === selectedMouseId;
-            const isScratching = mouseData.scratch_flag === 1;
-            // 動的カラーパレット: 定義されていないIDはデフォルト色にフォールバック
-            const colorEntry = this.mouseColors[mId] || { hex: "#AAAAAA", name: `M${mId}` };
-            const colorHex = colorEntry.hex;
+        // ── フェーズ1 確認モード: バウンディングボックス描画 ──────────────
+        // confirmationMode === 'bbox' / 'pose' どちらでも bbox を描画する
+        // （'pose' モードではうっすら、'bbox' モードでは強調）
+        if (this.confirmationMode && frameData.frame_idx !== undefined) {
+            this._drawPreviewBoundingBoxes(frameData.frame_idx);
+        }
 
-            this.drawMouse(mouseData, mId, isSelected, isScratching, colorHex);
+        // 2. Draw each mouse (動的マウス数対応: frameData.mice のエントリを全て描画)
+        // 'bbox' モードでは骨格・キーポイント描画をスキップ（バウンディングボックス確認に集中）
+        const drawSkeletons = this.confirmationMode !== 'bbox';
+        if (drawSkeletons) {
+            for (const [id, mouseData] of Object.entries(frameData.mice)) {
+                const mId = parseInt(id);
+                const isSelected = mId === selectedMouseId;
+                const isScratching = mouseData.scratch_flag === 1;
+                // 動的カラーパレット: 定義されていないIDはデフォルト色にフォールバック
+                const colorEntry = this.mouseColors[mId] || { hex: "#AAAAAA", name: `M${mId}` };
+                const colorHex = colorEntry.hex;
+
+                this.drawMouse(mouseData, mId, isSelected, isScratching, colorHex);
+            }
+        }
+    }
+
+    /**
+     * バウンディングボックスと検出 ID ラベルを描画する。
+     * 'bbox' モード: 太線・実線・大ラベルで強調
+     * 'pose' モード: 細線・破線・控えめなラベル
+     *
+     * バウンディングボックスはキーポイントの凸包から計算されているため、
+     * 動画上のマウスを正確に囲む。ラベルには track 名 と suggested mouse_id を表示し、
+     * 研究者が「この検出をどのマウスに割り当てるか」を判断できる。
+     */
+    _drawPreviewBoundingBoxes(frameIdx) {
+        const lookup = this._lookupPreviewDetections(frameIdx);
+        if (!lookup) return;
+
+        const ctx = this.ctx;
+        const isBboxMode = this.confirmationMode === 'bbox';
+
+        for (const det of lookup.detections) {
+            if (!det.bbox) continue;
+            const [x1, y1, x2, y2] = det.bbox;
+            const w = x2 - x1;
+            const h = y2 - y1;
+
+            // track → assigned mouse_id を appState 経由で取得（外部状態を参照）
+            // window.appState がない場合は det.mouse_id（カラーID自動推定値）を使用
+            let assignedId = det.mouse_id;
+            if (typeof window !== 'undefined' && window.appState && window.appState.confirmedMapping) {
+                const mapped = window.appState.confirmedMapping[det.track];
+                if (mapped) assignedId = mapped;
+            }
+
+            const colorEntry = (assignedId != null && this.mouseColors[assignedId])
+                ? this.mouseColors[assignedId]
+                : { hex: '#FFFFFF', name: '未割当' };
+
+            ctx.save();
+            ctx.strokeStyle = colorEntry.hex;
+            ctx.lineWidth = isBboxMode ? 4 : 2;
+            if (!isBboxMode) {
+                ctx.setLineDash([6, 4]);
+            }
+            ctx.strokeRect(x1, y1, w, h);
+
+            // ID ラベル（左上に配置）
+            const fontSize = isBboxMode ? 18 : 12;
+            ctx.font = `bold ${fontSize}px Outfit, sans-serif`;
+            const label = assignedId != null
+                ? `Mouse ${assignedId} (${colorEntry.name})`
+                : `${det.track} → ID未割当`;
+            const tw = ctx.measureText(label).width;
+            const padX = 8, padY = 5;
+            const labelW = tw + padX * 2;
+            const labelH = fontSize + padY * 2;
+            const labelX = Math.max(0, x1);
+            const labelY = Math.max(labelH, y1) - labelH;
+
+            ctx.fillStyle = colorEntry.hex;
+            ctx.globalAlpha = isBboxMode ? 0.92 : 0.6;
+            ctx.fillRect(labelX, labelY, labelW, labelH);
+            ctx.globalAlpha = 1.0;
+            ctx.fillStyle = '#000';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, labelX + padX, labelY + labelH / 2);
+
+            ctx.restore();
+        }
+
+        // 'bbox' モードでは、サンプリングフレームからずれている場合に注意を表示
+        if (isBboxMode && lookup.frame !== frameIdx) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(251, 191, 36, 0.85)';
+            ctx.font = '11px Outfit, sans-serif';
+            ctx.fillText(`サンプル frame=${lookup.frame} を表示中 (現在 ${frameIdx})`, 10, this.canvas.height - 10);
+            ctx.restore();
         }
     }
 
