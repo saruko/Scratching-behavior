@@ -438,17 +438,36 @@ class DeepLabCutEngine(BasePoseEngine):
 
     # SuperAnimal-Quadruped (39 点) → 内部 11 点マッピング (paws を直接含む)
     # 側面/斜め視点で撮影された動画に対しては、こちらの方が解剖学的に正確。
+    # DLC バージョンによってキーポイント名の表記が異なるため、
+    # 両方の命名規則をまとめて定義しておく。
     SUPERANIMAL_QUADRUPED_MAP = {
-        "nose":             "nose",
-        "left_earbase":     "left_ear",
-        "right_earbase":    "right_ear",
-        "throat_base":      "neck",
-        "back_middle":      "spine_mid",
-        "front_left_paw":   "left_fore_paw",
-        "front_right_paw":  "right_fore_paw",
-        "back_left_paw":    "left_hind_paw",
-        "back_right_paw":   "right_hind_paw",
-        "tail_base":        "tail_base",
+        # ─ DLC 3.x 標準名 ─
+        "nose":              "nose",
+        "left_earbase":      "left_ear",
+        "right_earbase":     "right_ear",
+        "throat_base":       "neck",
+        "back_middle":       "spine_mid",
+        "front_left_paw":    "left_fore_paw",
+        "front_right_paw":   "right_fore_paw",
+        "back_left_paw":     "left_hind_paw",
+        "back_right_paw":    "right_hind_paw",
+        "tail_base":         "tail_base",
+        # ─ 代替表記 (一部の DLC バージョン / ファインチューン済みモデル) ─
+        "Nose":              "nose",
+        "L_EarBase":         "left_ear",
+        "R_EarBase":         "right_ear",
+        "Throat":            "neck",
+        "Back":              "spine_mid",
+        "L_F_Paw":           "left_fore_paw",
+        "R_F_Paw":           "right_fore_paw",
+        "L_B_Paw":           "left_hind_paw",
+        "R_B_Paw":           "right_hind_paw",
+        "TailBase":          "tail_base",
+        # ─ 別表記パターン ─
+        "left_front_paw":    "left_fore_paw",
+        "right_front_paw":   "right_fore_paw",
+        "left_back_paw":     "left_hind_paw",
+        "right_back_paw":    "right_hind_paw",
         # head_center: 推論時に left_ear と right_ear の中点として補間
     }
 
@@ -529,12 +548,14 @@ class DeepLabCutEngine(BasePoseEngine):
                 print(f"[pose_engine] [Info] 初回実行時は SuperAnimal モデル (~数百MB) をダウンロードします。")
 
                 # DLC 3.x の SuperAnimal API
+                # videotype は拡張子のドットなし文字列を渡す (".mp4" → "mp4")
+                videotype = os.path.splitext(video_path)[1].lstrip(".")
                 dlc.video_inference_superanimal(
                     videos=[video_path],
                     superanimal_name=self.superanimal_name,
                     model_name=self.pose_model_name,
                     detector_name=self.detector_name,
-                    videotype=os.path.splitext(video_path)[1],
+                    videotype=videotype,
                     dest_folder=dest_folder,
                 )
 
@@ -619,12 +640,29 @@ class DeepLabCutEngine(BasePoseEngine):
                 ind_df = dlc_df.xs(individual, axis=1, level="individuals")
             else:
                 ind_df = dlc_df.copy()
-                # 最上位 scorer レベルを削除して (bodyparts, coords) にする
-                if ind_df.columns.nlevels > 2:
-                    ind_df.columns = ind_df.columns.droplevel(0)
 
-            # bodyparts のリスト
+            # ── Bug Fix: scorer レベルを除去して常に (bodyparts, coords) 2 レベルに統一 ──
+            # has_individuals=True の場合、xs() 後も (scorer, bodyparts, coords) の
+            # 3 レベルが残る。droplevel(0) しないと get_level_values(0) がスコアラー名を
+            # 返してしまい、bodyparts ループで全キーポイントが kp_map にヒットしなくなる。
+            if ind_df.columns.nlevels > 2:
+                ind_df.columns = ind_df.columns.droplevel(0)
+
+            # bodyparts のリスト（ドットなし coords "x","y","likelihood" を除く）
             bodyparts = ind_df.columns.get_level_values(0).unique().tolist()
+
+            # ── デバッグ: 最初の個体についてキーポイント名のヒット率をログ出力 ──
+            if ind_idx == 0:
+                matched = [bp for bp in bodyparts if kp_map.get(bp) is not None]
+                print(f"[pose_engine] [Info] DLC bodyparts 検出数={len(bodyparts)}, "
+                      f"内部マップヒット数={len(matched)}/{len(bodyparts)}")
+                unmatched = [bp for bp in bodyparts if kp_map.get(bp) is None]
+                if unmatched:
+                    print(f"[pose_engine] [Info]   マップなし bodypart: {unmatched[:10]}"
+                          + (" ..." if len(unmatched) > 10 else ""))
+                if len(matched) == 0:
+                    print("[pose_engine] [Warning] ⚠️ キーポイント名が内部マップと一致しません。"
+                          "モデルのキーポイント名を確認し、SUPERANIMAL_*_MAP を更新してください。")
 
             # head_center を ear の中点として補間する必要があるか?
             need_head_center_interp = (
