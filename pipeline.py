@@ -192,7 +192,11 @@ def main():
     parser.add_argument("--out_dir", type=str, default="outputs", help="CSV結果を出力するディレクトリ")
     parser.add_argument("--fps", type=int, default=None, help="動画のFPS設定 (configのデフォルト値をオーバーライド)")
     parser.add_argument("--px-to-mm", type=float, default=0.25, help="ピクセルからミリメートルへのキャリブレーション比率 (mm/pixel)")
-    
+    parser.add_argument("--gt", type=str, default=None, help="グラウンドトゥルース CSV パス (省略時は評価をスキップ)")
+    parser.add_argument("--gt-format", type=str, default="frame", choices=["frame", "bout"],
+                        help="GT CSV のフォーマット (frame または bout, デフォルト: frame)")
+    parser.add_argument("--iou", type=float, default=0.5, help="Bout 評価の Temporal IoU 閾値 (デフォルト: 0.5)")
+
     args = parser.parse_args()
 
     # 環境変数または引数でFPSなどを一時的にオーバーライドする設定
@@ -205,7 +209,26 @@ def main():
     print("\n========================================================")
     print(" Mouse Scratch Detection Pipeline")
     print("========================================================\n")
-    
+
+    # 動画から実際の FPS を読み取る (cv2 が使えない場合は DEFAULT_FPS にフォールバック)
+    fps = float(args.fps) if args.fps is not None else None
+    if fps is None:
+        try:
+            import cv2 as _cv2
+            _cap = _cv2.VideoCapture(args.video)
+            if _cap.isOpened():
+                fps = _cap.get(_cv2.CAP_PROP_FPS)
+                _cap.release()
+                if fps <= 0:
+                    fps = None
+        except Exception:
+            pass
+    if fps is None or fps <= 0:
+        fps = float(DEFAULT_FPS)
+        print(f"[pipeline] [Info] FPS を動画から取得できませんでした。デフォルト値を使用します: {fps} fps")
+    else:
+        print(f"[pipeline] [Info] 動画 FPS: {fps}")
+
     # 1. 姿勢推定ポーズデータのロード（または自動実行）
     if args.sleap is not None:
         if args.sleap.lower() == "dummy":
@@ -267,31 +290,51 @@ def main():
 
     # 3. 特徴量抽出およびスクラッチ・Bout検出の実行
     print("\n--- [Step 2] 特徴量抽出およびスクラッチ判定実行中 ---")
-    processed_df, bouts_df = feature_extraction.extract_features_and_bouts(
-        aligned_df, pixel_to_mm_ratio=args.px_to_mm
+    processed_df, bouts_df, summary_df = feature_extraction.extract_features_and_bouts(
+        aligned_df, pixel_to_mm_ratio=args.px_to_mm, fps=fps
     )
 
     # 4. CSVファイルの出力
     video_basename = os.path.splitext(os.path.basename(args.video))[0]
-    
-    frame_csv_path = os.path.join(args.out_dir, f"{video_basename}_frame_labels.csv")
-    bouts_csv_path = os.path.join(args.out_dir, f"{video_basename}_bouts.csv")
-    
+
+    frame_csv_path   = os.path.join(args.out_dir, f"{video_basename}_frame_labels.csv")
+    bouts_csv_path   = os.path.join(args.out_dir, f"{video_basename}_bouts.csv")
+    summary_csv_path = os.path.join(args.out_dir, f"{video_basename}_summary.csv")
+
     print("\n--- [Step 3] 結果のCSV書き出し中 ---")
-    
+
     # 学術的な正確性を保持するため、一律 0 で埋める fillna(0) は廃止。
     # 代わりに未割り当ての mouse_id (NaNなど) のみ、明示的に 0 (未解決ID) として割り振る
     if "mouse_id" in processed_df.columns:
         processed_df["mouse_id"] = processed_df["mouse_id"].fillna(0).astype(int)
-        
+
     # 保存時に欠損座標や欠損特徴量は "" (空) になるように na_rep を指定
     processed_df.to_csv(frame_csv_path, index=False, na_rep="")
     bouts_df.to_csv(bouts_csv_path, index=False, na_rep="")
-    
+    summary_df.to_csv(summary_csv_path, index=False, na_rep="")
+
     print(f"[pipeline] フレームラベルCSV保存完了: {frame_csv_path}")
     print(f"[pipeline] Bout情報CSV保存完了: {bouts_csv_path}")
+    print(f"[pipeline] サマリー統計CSV保存完了: {summary_csv_path}")
     print(f"[pipeline] 総検出 Bout 数: {len(bouts_df)} 件")
-    
+
+    # 5. グラウンドトゥルース評価（--gt 指定時のみ）
+    if args.gt:
+        print("\n--- [Step 4] グラウンドトゥルース評価実行中 ---")
+        try:
+            import evaluate as ev
+            ev.run_evaluation(
+                auto_frame_csv=frame_csv_path,
+                gt_csv=args.gt,
+                gt_format=args.gt_format,
+                fps=fps,
+                iou_threshold=args.iou,
+                output_dir=args.out_dir,
+                auto_bouts_csv=bouts_csv_path,
+            )
+        except Exception as e:
+            print(f"[pipeline] [Warning] 評価処理中にエラーが発生しました: {e}")
+
     print("\n========================================================")
     print(" パイプライン処理が正常に完了しました。")
     print("========================================================\n")

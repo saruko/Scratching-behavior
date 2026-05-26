@@ -60,11 +60,23 @@ MIN_CONFIDENCE          = _get_env("MIN_CONFIDENCE", 0.40)  # general keypoints
 HIND_PAW_MIN_CONF       = _get_env("HIND_PAW_MIN_CONF", 0.35)  # hind paws can be partially occluded — relax slightly
 INTERPOLATION_MAX_GAP   = _get_env("INTERPOLATION_MAX_GAP", 5)     # frames: interpolate gaps shorter than this
 
-# ── Scratch-detection thresholds ─────────────────────────────────────────────
-SCRATCH_WINDOW_FRAMES    = _get_env("SCRATCH_WINDOW_FRAMES", 15)   # sliding window for oscillation analysis
-SCRATCH_MIN_VELOCITY     = _get_env("SCRATCH_MIN_VELOCITY", 30)   # px/frame — hind-paw minimum speed
-SCRATCH_MAX_HEAD_DIST    = _get_env("SCRATCH_MAX_HEAD_DIST", 150)  # px  — hind paw must be this close to head
-SCRATCH_MIN_OSCILLATIONS = _get_env("SCRATCH_MIN_OSCILLATIONS", 3)    # velocity-sign reversals per window
+# ── Scratch-detection thresholds (PHYSICAL UNITS — cross-study reproducible) ─
+SCRATCH_WINDOW_FRAMES    = _get_env("SCRATCH_WINDOW_FRAMES", 15)     # frames — oscillation analysis window
+
+# mm/s threshold for minimum hind-paw speed (≈ 150 mm/s is conservative for active scratch)
+SCRATCH_MIN_VELOCITY_MM_S    = _get_env("SCRATCH_MIN_VELOCITY_MM_S",  150.0)
+# mm threshold for maximum hind-paw to ear distance during head-directed scratch
+SCRATCH_MAX_HEAD_DIST_MM     = _get_env("SCRATCH_MAX_HEAD_DIST_MM",    50.0)
+SCRATCH_MIN_OSCILLATIONS     = _get_env("SCRATCH_MIN_OSCILLATIONS",        3)  # direction reversals / window
+
+# Oscillation quality: ignore pose-estimation jitter smaller than this displacement
+SCRATCH_MIN_OSC_AMPLITUDE_PX = _get_env("SCRATCH_MIN_OSC_AMPLITUDE_PX",   3.0)  # px
+# Velocity smoothing: rolling-mean window to suppress single-frame outliers
+SCRATCH_VELOCITY_SMOOTH_FRAMES = _get_env("SCRATCH_VELOCITY_SMOOTH_FRAMES",   5)  # frames
+
+# DEPRECATED (pixel-based) — retained only for /api/config backward-compatibility
+SCRATCH_MIN_VELOCITY  = _get_env("SCRATCH_MIN_VELOCITY",  30)   # px/frame
+SCRATCH_MAX_HEAD_DIST = _get_env("SCRATCH_MAX_HEAD_DIST", 150)  # px
 
 # ── Bout post-processing ──────────────────────────────────────────────────────
 BOUT_MIN_FRAMES   = _get_env("BOUT_MIN_FRAMES", 5)   # discard bouts shorter than this

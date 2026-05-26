@@ -97,9 +97,17 @@ async def get_config():
     """
     import config
     return {
-        "SCRATCH_MIN_VELOCITY": config.SCRATCH_MIN_VELOCITY,
+        # 物理単位 (mm/s, mm) — 推奨
+        "SCRATCH_MIN_VELOCITY_MM_S":      config.SCRATCH_MIN_VELOCITY_MM_S,
+        "SCRATCH_MAX_HEAD_DIST_MM":       config.SCRATCH_MAX_HEAD_DIST_MM,
+        "SCRATCH_MIN_OSCILLATIONS":       config.SCRATCH_MIN_OSCILLATIONS,
+        "SCRATCH_MIN_OSC_AMPLITUDE_PX":   config.SCRATCH_MIN_OSC_AMPLITUDE_PX,
+        "SCRATCH_VELOCITY_SMOOTH_FRAMES": config.SCRATCH_VELOCITY_SMOOTH_FRAMES,
+        "PIXEL_TO_MM_RATIO":              config.PIXEL_TO_MM_RATIO,
+        "DEFAULT_FPS":                    config.DEFAULT_FPS,
+        # 後方互換 (px 単位, DEPRECATED)
+        "SCRATCH_MIN_VELOCITY":  config.SCRATCH_MIN_VELOCITY,
         "SCRATCH_MAX_HEAD_DIST": config.SCRATCH_MAX_HEAD_DIST,
-        "SCRATCH_MIN_OSCILLATIONS": config.SCRATCH_MIN_OSCILLATIONS
     }
 
 @app.get("/api/results")
@@ -128,6 +136,58 @@ async def list_results():
                         "bouts_csv_url": f"/outputs/{subdir}/{bouts_file}" if subdir and has_bouts else (f"/outputs/{bouts_file}" if has_bouts else None)
                     })
     return {"results": results}
+
+
+class EvaluateRequest(BaseModel):
+    auto_frame_csv: str          # outputs/ 配下の _frame_labels.csv パス (サーバー相対)
+    gt_csv: str                  # グラウンドトゥルース CSV の絶対パスまたはサーバー相対パス
+    gt_format: str = "frame"     # "frame" | "bout"
+    fps: float = 30.0
+    iou_threshold: float = 0.5
+    auto_bouts_csv: Optional[str] = None
+
+
+@app.post("/api/evaluate")
+async def run_evaluation(req: EvaluateRequest):
+    """
+    自動検出 CSV とグラウンドトゥルース CSV を比較してフレーム/Bout レベルの精度指標を返します。
+    """
+    try:
+        import evaluate as ev
+    except ImportError:
+        raise HTTPException(status_code=500, detail="evaluate モジュールが見つかりません。")
+
+    # パスの安全解決 (outputs/ 配下を想定)
+    def resolve(p: str) -> str:
+        if os.path.exists(p):
+            return p
+        candidate = os.path.join("outputs", p)
+        if os.path.exists(candidate):
+            return candidate
+        raise HTTPException(status_code=400, detail=f"ファイルが見つかりません: {p}")
+
+    auto_frame_path = resolve(req.auto_frame_csv)
+    gt_path         = resolve(req.gt_csv)
+    auto_bouts_path = resolve(req.auto_bouts_csv) if req.auto_bouts_csv else None
+
+    try:
+        result = ev.run_evaluation(
+            auto_frame_csv=auto_frame_path,
+            gt_csv=gt_path,
+            gt_format=req.gt_format,
+            fps=req.fps,
+            iou_threshold=req.iou_threshold,
+            output_dir="outputs",
+            auto_bouts_csv=auto_bouts_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"評価処理中にエラーが発生しました: {e}")
+
+    return {
+        "frame_metrics": result["frame_metrics"].to_dict(orient="records") if not result["frame_metrics"].empty else [],
+        "bout_metrics":  result["bout_metrics"].to_dict(orient="records")  if result["bout_metrics"] is not None and not result["bout_metrics"].empty else [],
+        "output_files":  result["output_files"],
+    }
 
 
 @app.get("/{filename}")
