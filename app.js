@@ -38,6 +38,14 @@ document.addEventListener('DOMContentLoaded', () => {
         // ── 動画エクスポート ────────────────────────────────────────────────
         mediaRecorder: null,
         recordedChunks: [],
+
+        // ── 動画解像度キャッシュ（canvas ↔ 動画座標変換用）────────────────────
+        // bgVideo.onloadeddata 時に設定される。0 の場合は動画未ロード。
+        videoW: 0,
+        videoH: 0,
+
+        // CSVデータが正常にロードされているか（デモデータを除く）
+        hasRealData: false,
     };
 
     // --- 2. Initialize Components ---
@@ -839,6 +847,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 adjustFrameDuration(videoFramesCount);
             }
 
+            // 動画の実解像度を記録（キーポイント座標の canvas 座標変換に使用）
+            appState.videoW = bgVideo.videoWidth;
+            appState.videoH = bgVideo.videoHeight;
+
+            // CSVデータがロード済みであれば canvas を動画の描画領域にフィット
+            if (appState.hasRealData) {
+                resizeCanvasToVideo();
+            }
+
             updateUIForFrame();
             alert(`✓ 動画の同期に成功しました！\nファイル: ${file.name}\n形式: ${file.type || fileExt}\n長さ: ${durationSec.toFixed(2)} 秒`);
         };
@@ -1191,6 +1208,68 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    // --- Canvas ↔ 動画座標系 同期ユーティリティ ---
+    // 動画は bg-video に object-fit: contain で表示されるため、コンテナより小さな
+    // 描画領域にレターボックス付きで収まる。cage-canvas をその描画領域に
+    // ピッタリ重ね、内部解像度を動画のネイティブ解像度に設定することで
+    // パイプライン出力のキーポイント座標（動画ピクセル空間）が canvas 内部座標系と
+    // 完全に一致し、マーカーがマウスの実位置に正確に描画される。
+
+    function resizeCanvasToVideo() {
+        if (!appState.videoW || !appState.videoH) return;
+        const canvas = document.getElementById('cage-canvas');
+        if (!canvas) return;
+        const container = canvas.parentElement;
+        if (!container) return;
+
+        const cRect = container.getBoundingClientRect();
+        const cW = cRect.width;
+        const cH = cRect.height;
+        if (!cW || !cH) return;
+
+        const vW = appState.videoW;
+        const vH = appState.videoH;
+
+        // object-fit: contain のスケール係数：縦横比を保ちコンテナに収める
+        const s = Math.min(cW / vW, cH / vH);
+        const rW = vW * s;
+        const rH = vH * s;
+        // レターボックス（黒帯）のオフセット
+        const left = (cW - rW) / 2;
+        const top  = (cH - rH) / 2;
+
+        // CSS 表示サイズを動画描画領域に合わせて配置
+        canvas.style.left   = `${left}px`;
+        canvas.style.top    = `${top}px`;
+        canvas.style.width  = `${rW}px`;
+        canvas.style.height = `${rH}px`;
+
+        // 内部解像度を動画の実ピクセル解像度に合わせる
+        // キーポイント座標（動画ピクセル空間）= canvas 内部座標系 が成立する
+        if (canvas.width !== vW || canvas.height !== vH) {
+            canvas.width  = vW;
+            canvas.height = vH;
+        }
+    }
+
+    function resetCanvasToDefault() {
+        const canvas = document.getElementById('cage-canvas');
+        if (!canvas) return;
+        canvas.style.left   = '0';
+        canvas.style.top    = '0';
+        canvas.style.width  = '100%';
+        canvas.style.height = '100%';
+        canvas.width  = 800;
+        canvas.height = 550;
+    }
+
+    // ウィンドウリサイズ時に canvas を動画描画領域に再フィット
+    window.addEventListener('resize', () => {
+        if (appState.hasRealData && appState.videoW && appState.videoH) {
+            resizeCanvasToVideo();
+        }
+    });
+
     function finalizeImport(fileName) {
         appState.currentFrame = 0;
         appState.isPlaying = false;
@@ -1206,6 +1285,12 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.redoStack = [];
         appState.editedFrames = new Set();
         updateUndoRedoButtons();
+
+        // 実CSVデータがロードされたことを記録し、canvas を動画描画領域に合わせてリサイズ
+        appState.hasRealData = true;
+        if (appState.videoW && appState.videoH) {
+            resizeCanvasToVideo();
+        }
 
         renderTimelineBouts();
         renderBoutsList();
