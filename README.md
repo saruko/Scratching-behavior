@@ -170,7 +170,7 @@ mouse-scratch-dashboard/
 │
 ├── app_server.py           # FastAPI バックエンド（配信・非同期解析・評価 API）
 ├── pipeline.py             # End-to-End 解析パイプライン
-├── pose_engine.py          # 姿勢推定エンジン（SLEAP / YOLOv8 / Mock）
+├── pose_engine.py          # 姿勢推定エンジン（SLEAP / YOLOv8 / DLC SuperAnimal / Mock）
 ├── color_id.py             # 尾色 HSV → mouse_id + Identity Swap 分割
 ├── feature_extraction.py   # 信頼度マスク・補間・mm 換算・スクラッチ判定
 ├── evaluate.py             # フレーム / Bout レベル精度評価
@@ -208,6 +208,10 @@ pip install -r requirements.txt
 #   GPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 #   CPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
+# 2-c. (オプション) DeepLabCut SuperAnimal を使う場合
+#   → 追加学習不要でマウス専用モデルを zero-shot 利用可能
+pip install 'deeplabcut[modelzoo,pytorch]>=3.0.0'
+
 # 3. FastAPI サーバー起動
 python app_server.py
 # → http://127.0.0.1:8000 でダッシュボードが開く
@@ -216,6 +220,7 @@ python app_server.py
 ### B. Google Colab
 
 `mouse_scratch_dashboard_colab.ipynb` を Colab で開き、Drive マウント → セルを順に実行 → `localtunnel` の URL からダッシュボードにアクセス。
+ステップ11 で **DeepLabCut SuperAnimal** （追加学習不要のマウス専用モデル）を 1 セル実行で導入できます。
 
 ### C. インストール不要のオフライン GUI 体験
 
@@ -240,6 +245,39 @@ python pipeline.py \
     --iou 0.5
 ```
 
+#### DeepLabCut SuperAnimal を使う（追加学習不要・マウス専用）
+
+```bash
+# 真上視点 (top-view) — 27 点骨格 (paws は shoulder/hip で近似)
+python pipeline.py \
+    --video data/videos/cage_01.mp4 \
+    --engine dlc \
+    --dlc-superanimal superanimal_topviewmouse \
+    --px-to-mm 0.231 \
+    --out_dir outputs/dlc_topview
+
+# 側面/斜め視点 — 39 点骨格 (paws を直接含む・解剖学的に最適)
+python pipeline.py \
+    --video data/videos/cage_side.mp4 \
+    --engine dlc \
+    --dlc-superanimal superanimal_quadruped \
+    --px-to-mm 0.231 \
+    --out_dir outputs/dlc_quadruped
+
+# 自分で学習したカスタム DLC プロジェクトを使う
+python pipeline.py \
+    --video data/videos/cage_01.mp4 \
+    --engine dlc \
+    --model_path /path/to/my_dlc_project/config.yaml \
+    --px-to-mm 0.231 \
+    --out_dir outputs/dlc_custom
+```
+
+| `--dlc-superanimal` 値 | キーポイント数 | 視点 | 含まれる解剖学的特徴 |
+|------------------------|--------------|------|----------------------|
+| `superanimal_topviewmouse` (デフォルト) | 27 | 真上 | nose, ears, shoulders, hips, tail (**paws なし → shoulder/hip で近似**) |
+| `superanimal_quadruped` | 39 | 側面 | nose, ears, **paws (4 足全て)**, joints, tail |
+
 出力（`outputs/cage_01_*.csv`）：
 - `cage_01_frame_labels.csv`：フレーム単位の全特徴量＋ scratch_flag / scratch_prob
 - `cage_01_bouts.csv`：Bout 単位の集計
@@ -248,7 +286,7 @@ python pipeline.py \
 ### GUI から実行
 
 1. ダッシュボードを開く → 動画ファイルをドロップ
-2. 「解析エンジン」（SLEAP / YOLOv8 / Mock）と pixel→mm 比を設定
+2. 「解析エンジン」（SLEAP / YOLOv8 / **DLC SuperAnimal (TopView / Quadruped)** / Mock）と pixel→mm 比を設定
 3. 「解析パイプラインを実行」をクリック → 非同期実行 → 完了後自動ロード
 
 ### 手動補正手順
@@ -366,7 +404,11 @@ python evaluate.py \
    デフォルト値 `0.25 mm/px` は仮の値です。各カメラ設置位置で **物差し・キャリブレーション物体を撮影し、ピクセル距離 ÷ 既知の実距離 mm** から実測値を算出して `--px-to-mm <値>` で指定してください。未校正だと **mm/s 速度・mm 距離の絶対値は無意味** となり、実験間比較に使えません。デフォルト値使用時はパイプラインが警告を出力します。
 
 3. **マウス専用学習モデルの使用（強く推奨）**
-   `Yolov8PoseEngine` は 17 点（COCO 人間用）モデルも動作しますが、`nose=0` を `nose` と `head_center` 両方に流用する近似マッピングのため、距離特徴量（`head_to_nose_dist` 等）が退化します。**マウス用に学習された 11 点モデル**（カスタム YOLOv8 または SLEAP）を使用してください。
+   `Yolov8PoseEngine` は 17 点（COCO 人間用）モデルも動作しますが、`nose=0` を `nose` と `head_center` 両方に流用する近似マッピングのため、距離特徴量（`head_to_nose_dist` 等）が退化します。マウス専用のキーポイントを得るには、次のいずれかを使用してください：
+
+   - **(推奨・最も簡単)** `--engine dlc --dlc-superanimal superanimal_topviewmouse` または `superanimal_quadruped` — DeepLabCut Model Zoo の公開マウスモデルを **追加学習なし (zero-shot)** で使用。Quadruped は paws を直接含むためひっかき検出で解剖学的に最適。
+   - SLEAP で自分の動画にラベリングして学習したカスタムモデル（最高精度・要 50〜200 フレームの手動ラベリング）。
+   - カスタム YOLOv8-pose の 11 点学習モデル（Roboflow データセット等で fine-tune）。
 
 4. **MockPoseEngine データの完全除外**
    `is_mock=1` のフレームを含む CSV は論文用途では破棄してください。GUI にも赤色警告バンドが表示されます。

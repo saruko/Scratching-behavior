@@ -389,6 +389,310 @@ class Yolov8PoseEngine(BasePoseEngine):
         return pd.DataFrame(records)
 
 
+# ── DeepLabCut Model Zoo 姿勢推定エンジン ───────────────────────────────────
+
+class DeepLabCutEngine(BasePoseEngine):
+    """
+    DeepLabCut (DLC) Model Zoo を使用した姿勢推定エンジン。
+
+    対応モデル:
+      - "superanimal_topviewmouse" : 真上視点用 (DLC 公式・27点骨格・マウス専用)
+      - "superanimal_quadruped"    : 側面/斜め視点用 (paws を含む 39点骨格)
+      - 任意のカスタム学習済み DLC config.yaml
+
+    DLC は zero-shot 推論で SuperAnimal モデルを使えるため、追加学習なしで
+    マウス専用骨格を取得可能。学術論文用途には推奨選択肢の一つ。
+
+    パラメータ
+    ----------
+    model_path : str | None
+        - None: SuperAnimal モデルを Model Zoo からダウンロードして使用
+        - 文字列 ("superanimal_topviewmouse" / "superanimal_quadruped"): 指定 Model Zoo モデル
+        - 既存 config.yaml への絶対パス: カスタム学習モデルを使用
+    superanimal_name : str
+        Model Zoo の名前。デフォルトは "superanimal_topviewmouse"。
+        model_path が config.yaml の場合は無視される。
+    detector_name : str
+        SuperAnimal の物体検出器。デフォルト "fasterrcnn_resnet50_fpn_v2"。
+    pose_model_name : str
+        SuperAnimal のポーズモデル。デフォルト "hrnet_w32"。
+    """
+
+    # SuperAnimal-TopViewMouse (27 点) → 内部 11 点マッピング
+    # ⚠️ SuperAnimal-TopViewMouse は俯瞰視点向けのため paw キーポイントが含まれない。
+    #    left_shoulder / left_hip を fore_paw / hind_paw の代替に使う近似マッピング。
+    #    ひっかき動作の検出感度はやや低下するため、Limitations への明記を推奨。
+    SUPERANIMAL_TOPVIEW_MAP = {
+        "nose":           "nose",
+        "left_ear":       "left_ear",
+        "right_ear":      "right_ear",
+        "mouse_center":   "head_center",     # ⚠️ approximated
+        "neck":           "neck",
+        "left_shoulder":  "left_fore_paw",   # ⚠️ approximated (shoulder ≠ paw)
+        "right_shoulder": "right_fore_paw",  # ⚠️ approximated
+        "mid_back":       "spine_mid",
+        "left_hip":       "left_hind_paw",   # ⚠️ approximated (hip ≠ paw)
+        "right_hip":      "right_hind_paw",  # ⚠️ approximated
+        "tail_base":      "tail_base",
+    }
+
+    # SuperAnimal-Quadruped (39 点) → 内部 11 点マッピング (paws を直接含む)
+    # 側面/斜め視点で撮影された動画に対しては、こちらの方が解剖学的に正確。
+    SUPERANIMAL_QUADRUPED_MAP = {
+        "nose":             "nose",
+        "left_earbase":     "left_ear",
+        "right_earbase":    "right_ear",
+        "throat_base":      "neck",
+        "back_middle":      "spine_mid",
+        "front_left_paw":   "left_fore_paw",
+        "front_right_paw":  "right_fore_paw",
+        "back_left_paw":    "left_hind_paw",
+        "back_right_paw":   "right_hind_paw",
+        "tail_base":        "tail_base",
+        # head_center: 推論時に left_ear と right_ear の中点として補間
+    }
+
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        device: Optional[str] = None,
+        superanimal_name: str = "superanimal_topviewmouse",
+        detector_name: str = "fasterrcnn_resnet50_fpn_v2",
+        pose_model_name: str = "hrnet_w32",
+    ):
+        super().__init__(model_path, device)
+        self.superanimal_name = superanimal_name
+        self.detector_name = detector_name
+        self.pose_model_name = pose_model_name
+
+        # model_path の解釈:
+        #   - None             → SuperAnimal Model Zoo (zero-shot)
+        #   - "superanimal_*"  → 指定された Model Zoo モデルへの切り替え
+        #   - 既存 *.yaml      → カスタム学習済み DLC プロジェクト
+        if self.model_path and self.model_path.startswith("superanimal_"):
+            self.superanimal_name = self.model_path
+            self.use_modelzoo = True
+            self.model_path = None
+        elif self.model_path and os.path.exists(self.model_path) and self.model_path.endswith((".yaml", ".yml")):
+            self.use_modelzoo = False
+        else:
+            self.use_modelzoo = True
+
+    def _auto_detect_model(self) -> Optional[str]:
+        """models/ から DLC config.yaml を検索。SuperAnimal の場合は None でも問題ない。"""
+        if os.path.exists("models"):
+            for item in os.listdir("models"):
+                if item.endswith(".yaml") or item.endswith(".yml"):
+                    path = os.path.join("models", item)
+                    print(f"[pose_engine] [Auto-Detect] DLC config を自動検出しました: {path}")
+                    return path
+            # SuperAnimal用にDLCモデルキャッシュフォルダがあるか
+            sa_cache = os.path.join("models", "dlc_modelzoo")
+            if os.path.isdir(sa_cache):
+                print(f"[pose_engine] [Auto-Detect] SuperAnimal キャッシュフォルダを検出: {sa_cache}")
+        return None
+
+    def _keypoint_map(self) -> dict:
+        """現在の SuperAnimal モデルに対応するキーポイントマッピングを返す。"""
+        if "topview" in self.superanimal_name.lower():
+            return self.SUPERANIMAL_TOPVIEW_MAP
+        elif "quadruped" in self.superanimal_name.lower():
+            return self.SUPERANIMAL_QUADRUPED_MAP
+        else:
+            # カスタムモデルではマッピングなし → DLC bodypart 名が KEYPOINTS と一致する前提
+            return {k: k for k in KEYPOINTS}
+
+    def run(self, video_path: str) -> pd.DataFrame:
+        # 1. DLC のインポート（重い依存のため遅延ロード）
+        try:
+            import deeplabcut as dlc
+        except ImportError:
+            print("[pose_engine] [Warning] deeplabcut ライブラリがインストールされていません。")
+            print("[pose_engine]            インストール: pip install 'deeplabcut[modelzoo,pytorch]'")
+            print("[pose_engine] [Fallback] MockPoseEngine にフォールバックします。")
+            fallback = MockPoseEngine(self.model_path, self.device)
+            return fallback.run(video_path)
+
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"動画ファイルが見つかりません: {video_path}")
+
+        # 2. 出力ディレクトリの準備
+        dest_folder = tempfile.mkdtemp(prefix="dlc_")
+        print(f"[pose_engine] [Info] DLC 推論用一時フォルダ: {dest_folder}")
+
+        # 3. 推論の実行
+        try:
+            if self.use_modelzoo:
+                # SuperAnimal Model Zoo (zero-shot inference)
+                print(f"[pose_engine] [Info] DeepLabCut SuperAnimal による推論を開始: "
+                      f"{self.superanimal_name} (detector={self.detector_name}, pose={self.pose_model_name})")
+                print(f"[pose_engine] [Info] 初回実行時は SuperAnimal モデル (~数百MB) をダウンロードします。")
+
+                # DLC 3.x の SuperAnimal API
+                dlc.video_inference_superanimal(
+                    videos=[video_path],
+                    superanimal_name=self.superanimal_name,
+                    model_name=self.pose_model_name,
+                    detector_name=self.detector_name,
+                    videotype=os.path.splitext(video_path)[1],
+                    dest_folder=dest_folder,
+                )
+
+                # ⚠️ TopView モデルは paw キーポイントを持たないことを警告
+                if "topview" in self.superanimal_name.lower():
+                    print("[pose_engine] [Warning] ⚠️ 学術利用注意: SuperAnimal-TopViewMouse は paw キーポイントを"
+                          "含まないため、left_fore_paw / left_hind_paw 等は left_shoulder / left_hip の近似値です。"
+                          "解剖学的に厳密な解析には SuperAnimal-Quadruped (側面視点) または paw を含む"
+                          "カスタム学習モデルを使用してください。")
+            else:
+                # カスタム学習済み DLC プロジェクト
+                print(f"[pose_engine] [Info] DLC analyze_videos を実行: config={self.model_path}")
+                dlc.analyze_videos(
+                    config=self.model_path,
+                    videos=[video_path],
+                    destfolder=dest_folder,
+                    save_as_csv=False,
+                )
+        except Exception as e:
+            print(f"[pose_engine] [Error] DLC の推論実行に失敗しました: {e}")
+            print("[pose_engine] [Fallback] MockPoseEngine にフォールバックします。")
+            fallback = MockPoseEngine(self.model_path, self.device)
+            return fallback.run(video_path)
+
+        # 4. 出力 H5 ファイルの探索
+        h5_candidates = [f for f in os.listdir(dest_folder) if f.endswith(".h5")]
+        if not h5_candidates:
+            print(f"[pose_engine] [Warning] DLC の H5 出力が見つかりません: {dest_folder}")
+            print("[pose_engine] [Fallback] MockPoseEngine にフォールバックします。")
+            fallback = MockPoseEngine(self.model_path, self.device)
+            return fallback.run(video_path)
+
+        h5_path = os.path.join(dest_folder, h5_candidates[0])
+        print(f"[pose_engine] [Info] DLC 結果 H5 を読み込み中: {h5_path}")
+
+        # 5. H5 → 内部ロングフォーマットへの変換
+        try:
+            df = self._parse_dlc_h5(h5_path)
+        except Exception as e:
+            print(f"[pose_engine] [Error] DLC H5 のパースに失敗しました: {e}")
+            print("[pose_engine] [Fallback] MockPoseEngine にフォールバックします。")
+            fallback = MockPoseEngine(self.model_path, self.device)
+            return fallback.run(video_path)
+
+        if df.empty:
+            print("[pose_engine] [Warning] DLC の検出座標が空でした。Mock にフォールバックします。")
+            fallback = MockPoseEngine(self.model_path, self.device)
+            return fallback.run(video_path)
+
+        print(f"[pose_engine] [Info] DLC 推論完了: {len(df)} 行 (キーポイント数={df['keypoint'].nunique()}, "
+              f"トラック数={df['track'].nunique()})")
+        return df
+
+    def _parse_dlc_h5(self, h5_path: str) -> pd.DataFrame:
+        """
+        DLC が出力した HDF5 ファイル (pandas MultiIndex 形式) を内部ロングフォーマットに変換する。
+        DLC の列構造:
+          - 単一個体    : (scorer, bodyparts, coords)            coords ∈ {x, y, likelihood}
+          - 複数個体    : (scorer, individuals, bodyparts, coords)
+        """
+        # DLC は pandas を必ず読める形式で書き出す
+        dlc_df = pd.read_hdf(h5_path)
+        if not isinstance(dlc_df.columns, pd.MultiIndex):
+            raise ValueError(f"DLC H5 の列形式が予期せぬ形式です: {dlc_df.columns}")
+
+        col_levels = dlc_df.columns.names
+        has_individuals = "individuals" in col_levels
+
+        kp_map = self._keypoint_map()
+
+        records = []
+        # 単一個体の場合は擬似的に 1 個体として処理
+        if has_individuals:
+            individuals = dlc_df.columns.get_level_values("individuals").unique().tolist()
+        else:
+            individuals = ["individual_0"]
+
+        for ind_idx, individual in enumerate(individuals):
+            track_name = f"track_{ind_idx}"
+
+            if has_individuals:
+                ind_df = dlc_df.xs(individual, axis=1, level="individuals")
+            else:
+                ind_df = dlc_df.copy()
+                # 最上位 scorer レベルを削除して (bodyparts, coords) にする
+                if ind_df.columns.nlevels > 2:
+                    ind_df.columns = ind_df.columns.droplevel(0)
+
+            # bodyparts のリスト
+            bodyparts = ind_df.columns.get_level_values(0).unique().tolist()
+
+            # head_center を ear の中点として補間する必要があるか?
+            need_head_center_interp = (
+                "head_center" not in [kp_map.get(bp) for bp in bodyparts]
+                and "left_ear" in bodyparts
+                and "right_ear" in bodyparts
+            )
+
+            for f_idx in ind_df.index:
+                # 行全体が NaN ならスキップ
+                row = ind_df.loc[f_idx]
+                if row.isna().all():
+                    continue
+
+                # head_center 補間用に ear の座標を一時保持
+                lear_x = lear_y = rear_x = rear_y = lear_c = rear_c = None
+
+                for bp in bodyparts:
+                    # この bp が内部 11 点のどれにマップされるか
+                    mapped_kp = kp_map.get(bp)
+                    if mapped_kp is None or mapped_kp not in KEYPOINTS:
+                        continue
+
+                    try:
+                        x = float(row[(bp, "x")])
+                        y = float(row[(bp, "y")])
+                        conf = float(row[(bp, "likelihood")]) if (bp, "likelihood") in row.index else 1.0
+                    except (KeyError, ValueError, TypeError):
+                        continue
+
+                    valid = not (np.isnan(x) or np.isnan(y))
+                    rec_conf = float(conf) if (valid and not np.isnan(conf)) else 0.0
+
+                    records.append({
+                        "frame":    int(f_idx),
+                        "track":    track_name,
+                        "keypoint": mapped_kp,
+                        "x":        float(x) if valid else np.nan,
+                        "y":        float(y) if valid else np.nan,
+                        "conf":     rec_conf,
+                        "is_mock":  0,
+                    })
+
+                    # ear 座標を retain (head_center 補間用)
+                    if need_head_center_interp:
+                        if mapped_kp == "left_ear" and valid:
+                            lear_x, lear_y, lear_c = x, y, rec_conf
+                        elif mapped_kp == "right_ear" and valid:
+                            rear_x, rear_y, rear_c = x, y, rec_conf
+
+                # head_center を ear の中点として補間
+                if (
+                    need_head_center_interp
+                    and lear_x is not None and rear_x is not None
+                ):
+                    records.append({
+                        "frame":    int(f_idx),
+                        "track":    track_name,
+                        "keypoint": "head_center",
+                        "x":        (lear_x + rear_x) / 2.0,
+                        "y":        (lear_y + rear_y) / 2.0,
+                        "conf":     min(lear_c, rear_c),
+                        "is_mock":  0,
+                    })
+
+        return pd.DataFrame(records)
+
+
 # ── Mock 姿勢推定エンジン (インテリジェントフォールバック) ────────────────────
 
 class MockPoseEngine(BasePoseEngine):

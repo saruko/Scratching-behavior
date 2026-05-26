@@ -1446,7 +1446,19 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const engine = pipelineEngine.value;
+        // GUI 上の擬似エンジン値を実エンジン + DLC モデル名へ展開する
+        // 例: "dlc_quadruped" → engine=dlc, dlc_superanimal=superanimal_quadruped
+        const engineRaw = pipelineEngine.value;
+        let engine, dlcSuperanimal = null;
+        if (engineRaw === "dlc_quadruped") {
+            engine = "dlc";
+            dlcSuperanimal = "superanimal_quadruped";
+        } else if (engineRaw === "dlc") {
+            engine = "dlc";
+            dlcSuperanimal = "superanimal_topviewmouse";
+        } else {
+            engine = engineRaw;
+        }
         const calibration = parseFloat(pipelineCalibration.value) || 0.25;
         const modelPath = pipelineModelPath.value.trim() || null;
 
@@ -1470,7 +1482,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 video_path: videoName,
                 engine: engine,
                 model_path: modelPath,
-                px_to_mm: calibration
+                px_to_mm: calibration,
+                // DLC エンジン時のみ Model Zoo モデル名を渡す (それ以外はサーバ側で無視される)
+                ...(dlcSuperanimal ? { dlc_superanimal: dlcSuperanimal } : {})
             })
         })
         .then(res => {

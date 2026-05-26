@@ -151,8 +151,15 @@ def main():
     parser = argparse.ArgumentParser(description="Mouse Scratch Detection System — End-to-End Pipeline")
     parser.add_argument("--video", type=str, required=True, help="解析対象の動画ファイルパス (.mp4 / .mov / .avi など OpenCV対応形式)")
     parser.add_argument("--sleap", type=str, default=None, help="SLEAPから出力された H5 ファイルパス (省略した場合は動画から自動的に姿勢推定を実行)")
-    parser.add_argument("--engine", type=str, default="yolov8", choices=["sleap", "yolov8", "mock"], help="姿勢推定の自動実行に使用するエンジン (デフォルト: yolov8)")
-    parser.add_argument("--model_path", type=str, default=None, help="姿勢推定モデルの重みファイルパス")
+    parser.add_argument("--engine", type=str, default="yolov8", choices=["sleap", "yolov8", "dlc", "mock"], help="姿勢推定の自動実行に使用するエンジン (デフォルト: yolov8)")
+    parser.add_argument("--model_path", type=str, default=None, help="姿勢推定モデルの重みファイル/設定パス (DLC ではカスタム config.yaml を指定可)")
+    parser.add_argument("--dlc-superanimal", type=str, default="superanimal_topviewmouse",
+                        choices=["superanimal_topviewmouse", "superanimal_quadruped"],
+                        help="DLC エンジン使用時の Model Zoo モデル名 (デフォルト: superanimal_topviewmouse)")
+    parser.add_argument("--dlc-detector", type=str, default="fasterrcnn_resnet50_fpn_v2",
+                        help="DLC SuperAnimal の物体検出器モデル名 (デフォルト: fasterrcnn_resnet50_fpn_v2)")
+    parser.add_argument("--dlc-pose-model", type=str, default="hrnet_w32",
+                        help="DLC SuperAnimal のポーズ推定モデル名 (デフォルト: hrnet_w32)")
     parser.add_argument("--out_dir", type=str, default="outputs", help="CSV結果を出力するディレクトリ")
     parser.add_argument("--fps", type=int, default=None, help="動画のFPS設定 (configのデフォルト値をオーバーライド)")
     parser.add_argument("--px-to-mm", type=float, default=0.25, help="ピクセルからミリメートルへのキャリブレーション比率 (mm/pixel)")
@@ -215,6 +222,13 @@ def main():
             engine = pose_engine.SleapEngine(model_path=args.model_path)
         elif args.engine == "yolov8":
             engine = pose_engine.Yolov8PoseEngine(model_path=args.model_path)
+        elif args.engine == "dlc":
+            engine = pose_engine.DeepLabCutEngine(
+                model_path=args.model_path,
+                superanimal_name=args.dlc_superanimal,
+                detector_name=args.dlc_detector,
+                pose_model_name=args.dlc_pose_model,
+            )
         else:
             engine = pose_engine.MockPoseEngine(model_path=args.model_path)
             

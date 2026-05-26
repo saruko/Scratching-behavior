@@ -52,10 +52,14 @@ TASKS_DB: Dict[str, dict] = load_tasks_db()
 
 class AnalysisRequest(BaseModel):
     video_path: str
-    engine: str = "yolov8"     # sleap | yolov8 | mock
+    engine: str = "yolov8"     # sleap | yolov8 | dlc | mock
     model_path: Optional[str] = None
     fps: Optional[int] = None
     px_to_mm: Optional[float] = 0.25
+    # DLC 専用パラメータ (engine == "dlc" 時に有効)
+    dlc_superanimal: Optional[str] = "superanimal_topviewmouse"  # or "superanimal_quadruped"
+    dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
+    dlc_pose_model: Optional[str] = "hrnet_w32"
 
     model_config = {
         "protected_namespaces": ()
@@ -237,6 +241,14 @@ def run_pipeline_task(task_id: str, req: AnalysisRequest):
         cmd.extend(["--model_path", req.model_path])
     if req.fps:
         cmd.extend(["--fps", str(req.fps)])
+    # DLC エンジン専用パラメータ
+    if req.engine == "dlc":
+        if req.dlc_superanimal:
+            cmd.extend(["--dlc-superanimal", req.dlc_superanimal])
+        if req.dlc_detector:
+            cmd.extend(["--dlc-detector", req.dlc_detector])
+        if req.dlc_pose_model:
+            cmd.extend(["--dlc-pose-model", req.dlc_pose_model])
 
     TASKS_DB[task_id]["log"] += f"[Server] 解析プロセスを開始します...\n[Server] コマンド: {' '.join(cmd)}\n\n"
     TASKS_DB[task_id]["log"] += "[Progress: 5%]\n"

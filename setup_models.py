@@ -94,6 +94,29 @@ def check_sleap() -> bool:
     return False
 
 
+def check_deeplabcut() -> bool:
+    """DeepLabCut (DLC) エンジンの確認"""
+    try:
+        import deeplabcut as dlc
+        version = getattr(dlc, "__version__", "?")
+        print(f"[models] ✅ DeepLabCut が利用可能です (v{version})")
+        # SuperAnimal API の存在確認 (DLC 3.x で導入された Model Zoo zero-shot)
+        if hasattr(dlc, "video_inference_superanimal"):
+            print("[models]    SuperAnimal Model Zoo (zero-shot 推論) が利用可能です:")
+            print("[models]      - superanimal_topviewmouse  (真上視点・27点・マウス専用)")
+            print("[models]      - superanimal_quadruped     (側面視点・39点・paws を含む)")
+        else:
+            print("[models] ⚠️  古い DLC バージョンが検出されました。SuperAnimal を使うには v3.0+ が必要です。")
+            print("              アップグレード: pip install -U 'deeplabcut[modelzoo,pytorch]'")
+        return True
+    except ImportError:
+        print("[models] ℹ️  DeepLabCut は未インストールです。")
+        print("           DLC SuperAnimal Model Zoo (zero-shot) を使用したい場合:")
+        print("             pip install 'deeplabcut[modelzoo,pytorch]'")
+        print("           ※ 既に他エンジン (YOLOv8/SLEAP) で十分な場合は不要です。")
+        return False
+
+
 def check_h5py() -> bool:
     """SLEAP H5 ファイル読み込みに必要な h5py の確認"""
     try:
@@ -139,6 +162,8 @@ if __name__ == "__main__":
     print()
     sleap_ok = check_sleap()
     print()
+    dlc_ok = check_deeplabcut()
+    print()
     h5_ok = check_h5py()
 
     list_available_models()
@@ -146,11 +171,14 @@ if __name__ == "__main__":
     print()
     print("=" * 58)
     print(" 推奨起動コマンド:")
+    if dlc_ok:
+        print("  python pipeline.py --video <動画> --engine dlc \\")
+        print("       --dlc-superanimal superanimal_topviewmouse   # 真上視点")
     if yolo_ok:
         print("  python pipeline.py --video <動画> --engine yolov8")
-    elif sleap_ok:
+    if sleap_ok:
         print("  python pipeline.py --video <動画> --engine sleap")
-    else:
+    if not (dlc_ok or yolo_ok or sleap_ok):
         print("  python pipeline.py --video <動画> --engine mock  (デモ用)")
     print()
     print("  Web ダッシュボード: python app_server.py")

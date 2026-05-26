@@ -14,3 +14,9 @@ httpx>=0.27.0
 # NOTE: PyTorch はシステムにより別途インストールが必要な場合があります
 # GPU (CUDA): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # CPU only:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+# ── オプション: DeepLabCut Model Zoo (SuperAnimal-TopViewMouse / Quadruped) ──
+# 学習済みマウス専用モデルを zero-shot で使う場合、以下を別途インストール:
+#   pip install 'deeplabcut[modelzoo,pytorch]'>=3.0.0
+# DLC は重い依存 (TensorFlow / PyTorch / hrnet 等) を含むため、必要な場合のみ導入する。
+# YOLOv8 / SLEAP で十分な場合はインストール不要。
