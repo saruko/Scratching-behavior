@@ -5,3 +5,10 @@ test_swap.mp4
 .venv/
 .uv/
 .DS_Store
+
+# Large files and models
+*.mov
+*.mp4
+models/
+.claude/
+.vscode/
