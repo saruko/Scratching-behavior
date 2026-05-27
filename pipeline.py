@@ -386,9 +386,62 @@ def main():
         else:
             engine = pose_engine.MockPoseEngine(model_path=args.model_path, device=device_override)
             
+        # ── プレビューモード時は動画をトリミングして処理量を削減 ──────────────────
+        # preview_only が True の場合、冒頭 preview_duration 秒分だけを一時ファイルに
+        # 切り出してエンジンに渡す。DLC は動画ファイル全体をシーケンシャルに読むため、
+        # フレーム数を絞ることで処理時間を大幅に短縮する（71,961フレーム → 約9,000フレーム）。
+        video_for_engine = args.video
+        _trimmed_tmp = None
+        if args.preview_only and args.preview_duration and os.path.exists(args.video):
+            try:
+                import cv2 as _cv2
+                _cap_trim = _cv2.VideoCapture(args.video)
+                _trim_fps   = _cap_trim.get(_cv2.CAP_PROP_FPS) or fps
+                _trim_total = int(_cap_trim.get(_cv2.CAP_PROP_FRAME_COUNT))
+                _max_frames = min(int(args.preview_duration * _trim_fps) + 1, _trim_total)
+                _cap_trim.release()
+
+                # トリミング先の一時ファイルを作成 (常に .mp4 を使用。cv2 の mp4v コーデックは
+                # .mov/.avi 等の元形式によらず確実に書き出せる。DLC も .mp4 を確実に読める)
+                _trimmed_tmp = os.path.join(args.out_dir, "__preview_trim.mp4")
+                _cap_src = _cv2.VideoCapture(args.video)
+                _w = int(_cap_src.get(_cv2.CAP_PROP_FRAME_WIDTH))
+                _h = int(_cap_src.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+                _fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
+                _writer = _cv2.VideoWriter(_trimmed_tmp, _fourcc, _trim_fps, (_w, _h))
+                _written = 0
+                while _written < _max_frames:
+                    _ret, _frm = _cap_src.read()
+                    if not _ret:
+                        break
+                    _writer.write(_frm)
+                    _written += 1
+                    # 進捗を10秒ごとに出力
+                    if _written % max(1, int(_trim_fps * 10)) == 0:
+                        _pct = int(_written / _max_frames * 100)
+                        print(f"[pipeline] [Preview-Trim] 動画トリミング中: {_written}/{_max_frames} フレーム ({_pct}%)")
+                _cap_src.release()
+                _writer.release()
+                print(f"[pipeline] [Preview-Trim] プレビュー用トリム動画を作成: "
+                      f"{_trimmed_tmp} ({_written} フレーム / {_written/_trim_fps:.1f} 秒)")
+                video_for_engine = _trimmed_tmp
+            except Exception as _e:
+                print(f"[pipeline] [Preview-Trim] トリミング失敗（元動画をそのまま使用）: {_e}")
+                video_for_engine = args.video
+
         # 姿勢推定の実行 (ロングフォーマットが返る)
-        long_df = engine.run(args.video)
-        
+        print(f"\n[Progress: 10%] 姿勢推定を開始します...")
+        long_df = engine.run(video_for_engine)
+        print(f"\n[Progress: 75%] 姿勢推定完了 — 特徴量抽出中...")
+
+        # トリミング一時ファイルを削除
+        if _trimmed_tmp and os.path.exists(_trimmed_tmp):
+            try:
+                os.remove(_trimmed_tmp)
+                print(f"[pipeline] [Preview-Trim] 一時ファイルを削除しました: {_trimmed_tmp}")
+            except Exception:
+                pass
+
         # ワイドフォーマットへの変換
         pose_df = long_to_wide_format(long_df)
         
@@ -488,10 +541,12 @@ def main():
         aligned_df = pose_df
 
     # 3. 特徴量抽出およびスクラッチ・Bout検出の実行
+    print(f"\n[Progress: 80%] 特徴量抽出およびスクラッチ判定実行中...")
     print("\n--- [Step 2] 特徴量抽出およびスクラッチ判定実行中 ---")
     processed_df, bouts_df, summary_df = feature_extraction.extract_features_and_bouts(
         aligned_df, pixel_to_mm_ratio=args.px_to_mm, fps=fps
     )
+    print(f"\n[Progress: 95%] 特徴量抽出完了 — CSV書き出し中...")
 
     # 4. CSVファイルの出力
     video_basename = os.path.splitext(os.path.basename(args.video))[0]

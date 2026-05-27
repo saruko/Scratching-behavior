@@ -572,7 +572,21 @@ class DeepLabCutEngine(BasePoseEngine):
                 # DLC 3.x の SuperAnimal API
                 # videotype は拡張子のドットなし文字列を渡す (".mp4" → "mp4")
                 videotype = os.path.splitext(video_path)[1].lstrip(".")
-                dlc.video_inference_superanimal(
+                # GPU デバイス指定: DLC 3.x は PyTorch を使うため CUDA_VISIBLE_DEVICES で制御する。
+                # CPU モードが明示指定された場合は "-1" で GPU を無効化する。
+                # DLC 2.x 系は gputouse パラメータを持つが 3.x では不要・無視されるため
+                # 環境変数方式をメインとし、gputouse は後方互換のためオプションで渡す。
+                if self.device == "cpu":
+                    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+                    print(f"[pose_engine] [Info] DLC 推論デバイス: CPU (CUDA_VISIBLE_DEVICES=-1)")
+                else:
+                    # "cuda" または自動: 既存の環境変数を尊重し、未設定なら GPU 0 を選択
+                    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+                    print(f"[pose_engine] [Info] DLC 推論デバイス: GPU (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '0')})")
+
+                # gputouse は DLC 2.x 互換引数として追加試行（TypeError の場合はスキップ）
+                _gpu_to_use = 0 if self.device != "cpu" else None
+                _dlc_kwargs = dict(
                     videos=[video_path],
                     superanimal_name=self.superanimal_name,
                     model_name=self.pose_model_name,
@@ -580,6 +594,12 @@ class DeepLabCutEngine(BasePoseEngine):
                     videotype=videotype,
                     dest_folder=dest_folder,
                 )
+                try:
+                    dlc.video_inference_superanimal(**_dlc_kwargs, gputouse=_gpu_to_use)
+                except TypeError:
+                    # DLC 3.x では gputouse を受け付けない場合 → 環境変数のみで制御
+                    print(f"[pose_engine] [Info] gputouse パラメータ非対応バージョン検出 — 環境変数で GPU 制御します。")
+                    dlc.video_inference_superanimal(**_dlc_kwargs)
 
                 # ⚠️ TopView モデルは paw キーポイントを持たないことを警告
                 if "topview" in self.superanimal_name.lower():
