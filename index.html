@@ -174,7 +174,7 @@
                             </div>
                             
                             <!-- フェーズ1 初期化確認モードのトグル -->
-                            <label style="display:flex; align-items:center; gap:6px; font-size:0.72rem; color: var(--text-secondary); padding: 4px 0;">
+                            <label id="preview-mode-toggle-label" style="display:flex; align-items:center; gap:6px; font-size:0.72rem; color: var(--text-secondary); padding: 4px 0;">
                                 <input type="checkbox" id="chk-use-preview-mode" style="accent-color: #A855F7;">
                                 <span><i data-lucide="shield-check" style="width:11px; height:11px; display:inline; vertical-align:-1px;"></i>
                                 初期化確認モードを使用する（冒頭5分でID確定後に本解析）</span>
@@ -513,7 +513,7 @@
                         <button class="control-btn" id="btn-next" title="次フレームへ"><i data-lucide="skip-forward" style="width: 18px; height: 18px;"></i></button>
                         <div class="time-display">
                             <span id="time-current">00:00.00</span>
-                            <span id="time-total" style="color: var(--text-muted);">/ 00:20.00</span>
+                            <span id="time-total" style="color: var(--text-muted);">/ --:--.--</span>
                         </div>
                     </div>
                 </div>
@@ -525,7 +525,7 @@
                     </div>
                     <div class="panel-body" style="padding: 12px 20px;">
                         <div class="scrub-container">
-                            <input type="range" id="scrub-slider" min="0" max="599" value="0" aria-label="タイムラインシークバー">
+                            <input type="range" id="scrub-slider" min="0" max="0" value="0" aria-label="タイムラインシークバー">
                         </div>
                         
                         <!-- Track markers - 動的生成: app.js の initDynamicMiceUI が

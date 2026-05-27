@@ -22,6 +22,27 @@ app = FastAPI(
     description="FastAPI backend to run the behavior detection pipeline and serve dashboard files."
 )
 
+# サーバー起動完了時に、ダッシュボードのアクセス先 URL を見やすく表示する。
+# uvicorn の "Application startup complete." 直前に呼び出されるため、ユーザーが
+# 最初に目にする情報として最適。
+@app.on_event("startup")
+async def _print_dashboard_url_banner():
+    # 環境変数 SERVER_PORT があれば使用、なければ 8000
+    _port = os.environ.get("SERVER_PORT", "8000")
+    _url_local   = f"http://127.0.0.1:{_port}"
+    _url_lan     = f"http://localhost:{_port}"
+    _banner = (
+        "\n"
+        "==========================================================\n"
+        "  Mouse Scratch Detection System — サーバー起動完了\n"
+        "==========================================================\n"
+        f"  ダッシュボードURL : {_url_local}\n"
+        f"                      {_url_lan}\n"
+        "  停止              : このウィンドウで Ctrl+C を押してください\n"
+        "==========================================================\n"
+    )
+    print(_banner, flush=True)
+
 # --- Task DB Persistence Helper [B-4] ---
 TASKS_DB_FILE = "tasks_db.json"
 TASKS_DB_LOCK = threading.Lock()

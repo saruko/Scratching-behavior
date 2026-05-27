@@ -1677,6 +1677,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- 12.5 FastAPI pipeline integration Event handlers (NEW) ---
 
+    // Mock エンジン選択時は「初期化確認モード」トグルを非表示にする
+    // （Mock はダミー座標を返すため、確認モードを通す意味がない）
+    function _syncPreviewToggleVisibility() {
+        const label = document.getElementById('preview-mode-toggle-label');
+        const chk   = document.getElementById('chk-use-preview-mode');
+        if (!label || !pipelineEngine) return;
+        if (pipelineEngine.value === 'mock') {
+            label.style.display = 'none';
+            if (chk) chk.checked = false; // 確認モードを強制 OFF
+        } else {
+            label.style.display = 'flex';
+        }
+    }
+    if (pipelineEngine) {
+        pipelineEngine.addEventListener('change', _syncPreviewToggleVisibility);
+        _syncPreviewToggleVisibility(); // 起動時にも反映
+    }
+
     // パス入力欄に直接テキストを入力した場合もボタンを活性化する
     // （動画をドロップせずにサーバーパスを手動入力するワークフロー向け）
     if (pipelineVideoPath) {
@@ -2947,6 +2965,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (appState.data && appState.data.frames && appState.data.frames[0]) {
         const initialMice = Object.keys(appState.data.frames[0].mice).map(n => parseInt(n)).sort((a, b) => a - b);
         if (initialMice.length > 0) appState.miceIds = initialMice;
+    }
+    // スクラブスライダー & 総時間表示をデモデータに合わせて初期化
+    // （HTML 側のハードコード値を削除したため、JS 側で動的にセットする）
+    if (appState.data && appState.data.numFrames > 0) {
+        scrubSlider.max = appState.data.numFrames - 1;
+        const _demoDurSec = appState.data.numFrames / (appState.data.fps || 30);
+        timeTotal.textContent = `/ ${formatTime(_demoDurSec)}`;
     }
     initDynamicMiceUI(appState.miceIds);
     updateUndoRedoButtons();
