@@ -47,6 +47,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // CSVデータが正常にロードされているか（デモデータを除く）
         hasRealData: false,
 
+        // バックエンド解析が進行中か（true の場合はデモ座標をcanvasに描画しない）
+        isAnalysisRunning: false,
+
         // ── フェーズ1 初期化確認モード ────────────────────────────────────
         // active: 確認モード中フラグ
         // step: 'bbox' (バウンディングボックス確認) | 'pose' (ポーズ確認) | null
@@ -286,7 +289,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Draw skeletons on canvas
-        visualizer.draw(frameData, appState.selectedMouse);
+        // 解析実行中で実データ未ロードの場合はデモ座標を描画しない
+        // （解析中プレースホルダーは btnRunPipeline の click ハンドラで描画済み）
+        if (appState.isAnalysisRunning && !appState.hasRealData) {
+            // 何もしない（プレースホルダーを上書きしない）
+        } else {
+            visualizer.draw(frameData, appState.selectedMouse);
+        }
 
         // Update features cards & signal charts
         updateFeatureInspector(frameData);
@@ -823,20 +832,20 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log('[Video] MOVファイルを読み込み中: ', file.name, '| MIME:', file.type);
         }
 
-        // Show upload progress bar
+        // アップロード進捗バーを表示（読み込み中）
+        // ローカルファイルは URL.createObjectURL() で即時利用可能なため
+        // FileReader.readAsArrayBuffer()（2GB超で進捗イベントが発火しない・全RAM消費）は使用しない。
+        // 代わりに video.onloadeddata 完了時に 100% へ切り替える。
         showUploadProgress(file.name);
-
-        // Use FileReader to get progress events (binary data read)
-        const reader = new FileReader();
-        reader.onprogress = (e) => {
-            if (e.lengthComputable) {
-                updateUploadProgress(e.loaded, e.total, file.name);
-            }
-        };
-        reader.onload = () => {
-            completeUploadProgress(file.name);
-        };
-        reader.readAsArrayBuffer(file);
+        const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+        uploadProgressLabel.textContent = `読み込み中: ${file.name} (${sizeMB} MB)`;
+        // 動画デコード中を示す暫定値として 50% へアニメーション
+        // requestAnimationFrame で1フレーム遅らせて 0%→50% のCSS遷移を確実に発生させる
+        requestAnimationFrame(() => {
+            uploadProgressBar.style.transition = 'width 0.8s ease';
+            uploadProgressBar.style.width = '50%';
+            uploadProgressPct.textContent = '50%';
+        });
 
         const url = URL.createObjectURL(file);
         
@@ -854,6 +863,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (overlayPlaceholder) overlayPlaceholder.classList.add('hidden-placeholder');
         
         bgVideo.onloadeddata = () => {
+            // 動画デコード完了 → アップロード進捗バーを 100% に
+            completeUploadProgress(file.name);
+
             appState.isPlaying = false;
             playIcon.setAttribute('data-lucide', 'play');
             lucide.createIcons();
@@ -1702,6 +1714,34 @@ document.addEventListener('DOMContentLoaded', () => {
             : "[Server] 解析リクエストを送信中...\n";
         pipelineStatusPanel.style.color = "#38BDF8";
 
+        // ── Fix: バッジを「解析中」に切り替え ───────────────────────────────
+        // 解析完了（finalizeImport）まで「デモ表示中」のまま残らないよう更新する
+        appState.isAnalysisRunning = true;
+        const _badge = document.getElementById('loaded-file-name');
+        if (_badge) {
+            _badge.textContent = usePreviewMode ? `プレビュー解析中: ${videoName}` : `解析実行中: ${videoName}`;
+            _badge.style.color = "#38BDF8";
+        }
+
+        // ── Fix: デモ用オーバーレイを非表示にしてキャンバスをクリア ─────────
+        // 実際の解析データが来る前にデモ座標が表示されないようにする
+        const _cvs = document.getElementById('cage-canvas');
+        if (_cvs) {
+            const _ctx = _cvs.getContext('2d');
+            _ctx.clearRect(0, 0, _cvs.width, _cvs.height);
+            // 「解析中」プレースホルダーを描画
+            _ctx.fillStyle = "rgba(56, 189, 248, 0.12)";
+            _ctx.fillRect(0, 0, _cvs.width, _cvs.height);
+            _ctx.fillStyle = "#38BDF8";
+            _ctx.font = `bold ${Math.floor(_cvs.height * 0.045)}px sans-serif`;
+            _ctx.textAlign = "center";
+            _ctx.textBaseline = "middle";
+            _ctx.fillText("🔬 DLC 解析中 — 完了後にオーバーレイが表示されます", _cvs.width / 2, _cvs.height / 2);
+            _ctx.font = `${Math.floor(_cvs.height * 0.03)}px sans-serif`;
+            _ctx.fillStyle = "rgba(255,255,255,0.5)";
+            _ctx.fillText(`動画: ${videoName}`, _cvs.width / 2, _cvs.height / 2 + _cvs.height * 0.06);
+        }
+
         // 確認モード状態を初期化
         if (usePreviewMode) {
             appState.previewMode = {
@@ -1858,6 +1898,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     clearInterval(appState.pollingInterval);
                     appState.pollingInterval = null;
                     completeAnalysisProgressBar(true);
+                    // 解析完了フラグをリセット（canvas の描画制御に使用）
+                    appState.isAnalysisRunning = false;
 
                     // ── プレビュー完了: 確認モードへ遷移 ──────────────────
                     if (data.results && data.results.preview_data_url) {
@@ -1883,6 +1925,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     clearInterval(appState.pollingInterval);
                     appState.pollingInterval = null;
                     completeAnalysisProgressBar(false);
+                    appState.isAnalysisRunning = false; // エラー終了時もフラグをリセット
                     pipelineStatusPanel.textContent += "\n[Server] [Error] 解析が異常終了しました。\n";
                     pipelineStatusPanel.style.color = "#EF4444";
                     btnRunPipeline.disabled = false;
@@ -1894,6 +1937,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 clearInterval(appState.pollingInterval);
                 appState.pollingInterval = null;
                 completeAnalysisProgressBar(false);
+                appState.isAnalysisRunning = false; // 通信エラー時もフラグをリセット
                 console.error(err);
                 pipelineStatusPanel.textContent += `\n[Error] 通信エラー: ${err.message}`;
                 pipelineStatusPanel.style.color = "#EF4444";

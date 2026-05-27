@@ -22,14 +22,36 @@ def detect_gpu_device() -> str:
     実行環境のGPU可用性を自動判定します。
     PyTorchが利用可能で、CUDA対応GPUが認識できる場合は "cuda" を返し、
     それ以外の場合は "cpu" を返します（CPUフォールバック）。
+
+    互換性チェック: 小さなテンソルを実際に GPU で実行し、カーネルが利用可能か確認します。
+    RTX 5080 (sm_120 / Blackwell) + PyTorch 2.5以前 のような非互換組み合わせを
+    クリーンに検出し、黙って CPU にフォールバックします。
     """
     try:
         import torch
-        if torch.cuda.is_available():
-            print(f"[pose_engine] [GPU-Detect] CUDA対応GPUが検出されました: {torch.cuda.get_device_name(0)}")
-            return "cuda"
-        else:
+        if not torch.cuda.is_available():
             print("[pose_engine] [GPU-Detect] GPUが検出されませんでした。CPU推論を使用します。")
+            return "cpu"
+
+        device_name = torch.cuda.get_device_name(0)
+        cap = torch.cuda.get_device_capability(0)
+        cap_str = f"sm_{cap[0]}{cap[1]}"
+
+        # 実際にカーネルを起動して互換性を検証する（torch.cuda.is_available() は
+        # ドライバ検出のみで、カーネル互換性まではチェックしない）
+        try:
+            _t = torch.tensor([1.0], device="cuda")
+            _ = _t * 2.0  # 演算も実行してカーネルロードを確認
+            del _t
+            print(f"[pose_engine] [GPU-Detect] GPU使用可能: {device_name} ({cap_str})")
+            return "cuda"
+        except Exception as e:
+            # CUDA error: no kernel image は PyTorch と GPU のアーキテクチャ非互換を示す
+            print(f"[pose_engine] [GPU-Detect] GPU ({device_name}, {cap_str}) は現在の PyTorch ビルドでは"
+                  f"利用できません: {type(e).__name__}")
+            print(f"[pose_engine] [GPU-Detect] → CPU にフォールバックします。")
+            print(f"[pose_engine] [GPU-Detect] 修正: pip install torch --index-url "
+                  f"https://download.pytorch.org/whl/cu128 で PyTorch を再インストールしてください。")
             return "cpu"
     except ImportError:
         print("[pose_engine] [GPU-Detect] PyTorchがインストールされていません。CPU推論を使用します。")

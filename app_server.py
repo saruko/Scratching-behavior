@@ -63,6 +63,8 @@ class AnalysisRequest(BaseModel):
     roi_y1: Optional[int] = None
     roi_x2: Optional[int] = None
     roi_y2: Optional[int] = None
+    # 推論デバイス指定 (None = GPU互換性チェック後に自動選択, "cuda" = GPU強制, "cpu" = CPU強制)
+    device: Optional[str] = None
     # DLC 専用パラメータ (engine == "dlc" 時に有効)
     dlc_superanimal: Optional[str] = "superanimal_topviewmouse"  # or "superanimal_quadruped"
     dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
@@ -344,6 +346,8 @@ def run_pipeline_task(task_id: str, req: AnalysisRequest):
     ])
     if req.model_path:
         cmd.extend(["--model_path", req.model_path])
+    if req.device:
+        cmd.extend(["--device", req.device])
     if req.fps:
         cmd.extend(["--fps", str(req.fps)])
     if req.mice_count and req.mice_count > 0:
@@ -567,6 +571,7 @@ class ConfirmIdsRequest(BaseModel):
     roi_y1: Optional[int] = None
     roi_x2: Optional[int] = None
     roi_y2: Optional[int] = None
+    device: Optional[str] = None
     dlc_superanimal: Optional[str] = "superanimal_topviewmouse"
     dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
     dlc_pose_model: Optional[str] = "hrnet_w32"

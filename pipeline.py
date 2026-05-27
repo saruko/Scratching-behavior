@@ -305,6 +305,10 @@ def main():
     #                      指定するとカラーID自動分類をスキップしてこのマッピングを使用する。
     parser.add_argument("--confirmed-mapping", type=str, default=None,
                         help='研究者確認済み track→mouse_id マッピング (JSON文字列: {"track_0": 1, ...})')
+    parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"],
+                        help="推論デバイスを明示指定 (cuda / cpu)。省略時は GPU 互換性を自動判定して選択。"
+                             "RTX 5080 など新世代 GPU を確実に使いたい場合は --device cuda を明示することで"
+                             "GPU 互換性チェックをスキップできます（非互換の場合は CUDA エラーで停止）。")
 
     args = parser.parse_args()
 
@@ -365,19 +369,22 @@ def main():
         print(f"[pipeline] 使用エンジン: {args.engine.upper()} (モデルパス: {args.model_path})")
         
         # エンジンのインスタンス化
+        # --device が明示指定された場合はそれを使用。省略時は detect_gpu_device() が互換性チェック後に選択。
+        device_override = args.device  # None = 自動 / "cuda" or "cpu" = 強制
         if args.engine == "sleap":
-            engine = pose_engine.SleapEngine(model_path=args.model_path)
+            engine = pose_engine.SleapEngine(model_path=args.model_path, device=device_override)
         elif args.engine == "yolov8":
-            engine = pose_engine.Yolov8PoseEngine(model_path=args.model_path)
+            engine = pose_engine.Yolov8PoseEngine(model_path=args.model_path, device=device_override)
         elif args.engine == "dlc":
             engine = pose_engine.DeepLabCutEngine(
                 model_path=args.model_path,
+                device=device_override,
                 superanimal_name=args.dlc_superanimal,
                 detector_name=args.dlc_detector,
                 pose_model_name=args.dlc_pose_model,
             )
         else:
-            engine = pose_engine.MockPoseEngine(model_path=args.model_path)
+            engine = pose_engine.MockPoseEngine(model_path=args.model_path, device=device_override)
             
         # 姿勢推定の実行 (ロングフォーマットが返る)
         long_df = engine.run(args.video)
