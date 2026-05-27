@@ -34,7 +34,7 @@ class CageVisualizer {
                 1: { hex: "#EF4444", name: "赤" },
                 2: { hex: "#3B82F6", name: "青" },
                 3: { hex: "#EAB308", name: "黄" },
-                4: { hex: "#9CA3AF", name: "黒" },
+                4: { hex: "#9CA3AF", name: "灰" },
                 5: { hex: "#F0F0F0", name: "白" },
                 6: { hex: "#F97316", name: "橙" },
                 7: { hex: "#22C55E", name: "緑" },

@@ -7,7 +7,7 @@
     
     <!-- SEO Meta Tags -->
     <meta name="description" content="SLEAP多個体ポーズトラッキングと尾部カラーIDに基づき、マウスの高速なひっかき動作をリアルタイムに自動検出・分析するインタラクティブなWebダッシュボード。">
-    <meta name="keywords" content="SLEAP, SimBA, マウス, ひっかき行動, ポーズ推定, 行動解析, バイオインフォマティクス, 薬理ゲノミクス">
+    <meta name="keywords" content="SLEAP, DeepLabCut, YOLOv8, マウス, ひっかき行動, ポーズ推定, 行動解析, バイオインフォマティクス, 薬理ゲノミクス">
     
     <!-- Google Fonts Preload -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -32,7 +32,7 @@
                 </div>
                 <div>
                     <h1 class="brand-title">Mouse Scratch Detection System</h1>
-                    <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 1px;">SLEAP Pose & Tail-Color ID Kinematic Analyzer (Manual Correction Mode)</p>
+                    <p style="font-size: 0.72rem; color: var(--text-muted); margin-top: 1px;">DeepLabCut / YOLOv8 / SLEAP 姿勢推定 & キネマティクス解析 (手動補正モード)</p>
                 </div>
             </div>
             
@@ -104,7 +104,7 @@
                         <div id="upload-progress-container" style="display: none;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
                                 <span style="font-size: 0.7rem; color: var(--text-secondary); font-weight: 500;">
-                                    <i data-lucide="upload" style="width: 12px; height: 12px; display: inline;"></i> アップロード読み込み率
+                                    <i data-lucide="upload" style="width: 12px; height: 12px; display: inline;"></i> 動画読み込み状況
                                 </span>
                                 <span id="upload-progress-pct" style="font-size: 0.7rem; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;">0%</span>
                             </div>
@@ -123,7 +123,7 @@
                             <!-- Analysis Settings Form -->
                             <div style="display: flex; flex-direction: column; gap: 6px;">
                                 <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px;">
-                                    <span style="font-size: 0.72rem; color: var(--text-secondary); font-weight: 500;">動画の絶対パス (Colab/Drive等):</span>
+                                    <span style="font-size: 0.72rem; color: var(--text-secondary); font-weight: 500;">動画の絶対パス (ローカル/サーバー):</span>
                                     <input type="text" id="pipeline-video-path" placeholder="例: /content/drive/MyDrive/300.mov" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; width: 100%; padding: 4px 6px; border-radius:4px; font-size: 0.7rem; box-sizing: border-box;">
                                 </div>
                                 <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -205,7 +205,7 @@
                             </div>
 
                             <!-- フェーズ1 初期化確認パネル（プレビュー完了後に表示） -->
-                            <div id="confirmation-panel" style="display: none; background: linear-gradient(135deg, rgba(168, 85, 247, 0.08) 0%, rgba(236, 72, 153, 0.05) 100%); border: 1px solid rgba(168, 85, 247, 0.4); border-radius: 8px; padding: 10px; display: none; flex-direction: column; gap: 8px;">
+                            <div id="confirmation-panel" style="display: none; background: linear-gradient(135deg, rgba(168, 85, 247, 0.08) 0%, rgba(236, 72, 153, 0.05) 100%); border: 1px solid rgba(168, 85, 247, 0.4); border-radius: 8px; padding: 10px; flex-direction: column; gap: 8px;">
                                 <div style="font-size: 0.78rem; font-weight: 700; color: #C084FC; display:flex; align-items:center; gap:5px;">
                                     <i data-lucide="shield-check" style="width:13px; height:13px;"></i>初期化確認モード
                                 </div>
@@ -275,7 +275,7 @@
                             <button class="mouse-btn" data-mouse-id="4" style="--active-border-color: var(--color-mouse-4); --active-glow-color: rgba(156, 163, 175, 0.3);">
                                 <div class="mouse-info">
                                     <span class="mouse-color-dot" style="color: var(--color-mouse-4); background-color: currentColor;"></span>
-                                    <span class="mouse-label">Mouse 4 (黒)</span>
+                                    <span class="mouse-label">Mouse 4 (灰)</span>
                                 </div>
                                 <span class="mouse-scratch-badge">ひっかき中</span>
                             </button>
@@ -306,7 +306,7 @@
                                         <option value="1">Mouse 1 (赤)</option>
                                         <option value="2">Mouse 2 (青)</option>
                                         <option value="3">Mouse 3 (黄)</option>
-                                        <option value="4">Mouse 4 (黒)</option>
+                                        <option value="4">Mouse 4 (灰)</option>
                                     </select>
                                 </div>
                                 <!-- DX / DY -->
@@ -352,13 +352,13 @@
                                     <option value="1">Mouse 1 (赤)</option>
                                     <option value="2">Mouse 2 (青)</option>
                                     <option value="3">Mouse 3 (黄)</option>
-                                    <option value="4">Mouse 4 (黒)</option>
+                                    <option value="4">Mouse 4 (灰)</option>
                                 </select>
                                 <select id="swap-mouse-b" class="speed-select" style="width:100%;" aria-label="個体B">
                                     <option value="1">Mouse 1 (赤)</option>
                                     <option value="2">Mouse 2 (青)</option>
                                     <option value="3" selected>Mouse 3 (黄)</option>
-                                    <option value="4">Mouse 4 (黒)</option>
+                                    <option value="4">Mouse 4 (灰)</option>
                                 </select>
                             </div>
                             <div style="display: flex; flex-direction: column; gap: 6px;">
@@ -419,13 +419,13 @@
                                 <label style="font-size: 0.7rem; color: var(--text-secondary);">最小速度 (mm/s)
                                     <input type="number" id="thr-min-vel-mms" step="10" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
                                 </label>
-                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最大耳距離 (mm)
+                                <label style="font-size: 0.7rem; color: var(--text-secondary);">後肢↔耳 間距離上限 (mm)
                                     <input type="number" id="thr-max-head-mm" step="5" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
                                 </label>
                                 <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振動数
                                     <input type="number" id="thr-min-osc" step="1" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
                                 </label>
-                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振幅 (px)
+                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振幅 (mm)
                                     <input type="number" id="thr-min-osc-amp" step="0.5" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
                                 </label>
                             </div>
@@ -566,40 +566,40 @@
                             
                             <!-- Left Paw Speed -->
                             <div class="inspector-card">
-                                <div class="inspector-val" id="val-speed-l">0 px/f</div>
+                                <div class="inspector-val" id="val-speed-l">0 mm/s</div>
                                 <div class="inspector-lbl">左後肢 速度</div>
                                 <div class="threshold-indicator" id="stat-speed-l">
-                                    <span>閾値: &gt;30px</span>
+                                    <span>閾値: &gt;150mm/s</span>
                                     <span>-</span>
                                 </div>
                             </div>
-                            
+
                             <!-- Right Paw Speed -->
                             <div class="inspector-card">
-                                <div class="inspector-val" id="val-speed-r">0 px/f</div>
+                                <div class="inspector-val" id="val-speed-r">0 mm/s</div>
                                 <div class="inspector-lbl">右後肢 速度</div>
                                 <div class="threshold-indicator" id="stat-speed-r">
-                                    <span>閾値: &gt;30px</span>
+                                    <span>閾値: &gt;150mm/s</span>
                                     <span>-</span>
                                 </div>
                             </div>
 
                             <!-- Left Ear Dist -->
                             <div class="inspector-card">
-                                <div class="inspector-val" id="val-dist-l">150 px</div>
+                                <div class="inspector-val" id="val-dist-l">-- mm</div>
                                 <div class="inspector-lbl">左後肢 ↔ 左耳 距離</div>
                                 <div class="threshold-indicator" id="stat-dist-l">
-                                    <span>閾値: &lt;150px</span>
+                                    <span>閾値: &lt;50mm</span>
                                     <span>-</span>
                                 </div>
                             </div>
 
                             <!-- Right Ear Dist -->
                             <div class="inspector-card">
-                                <div class="inspector-val" id="val-dist-r">150 px</div>
+                                <div class="inspector-val" id="val-dist-r">-- mm</div>
                                 <div class="inspector-lbl">右後肢 ↔ 右耳 距離</div>
                                 <div class="threshold-indicator" id="stat-dist-r">
-                                    <span>閾値: &lt;150px</span>
+                                    <span>閾値: &lt;50mm</span>
                                     <span>-</span>
                                 </div>
                             </div>

@@ -176,7 +176,7 @@ class DashboardCharts {
                 this.boutCountChart = new Chart(countCtx, {
                     type: 'bar',
                     data: {
-                        labels: ['Mouse 1 (赤)', 'Mouse 2 (青)', 'Mouse 3 (黄)', 'Mouse 4 (黒)'],
+                        labels: ['Mouse 1 (赤)', 'Mouse 2 (青)', 'Mouse 3 (黄)', 'Mouse 4 (灰)'],
                         datasets: [{
                             label: 'ひっかき発生回数 (Bouts)',
                             data: dataCounts,
@@ -230,7 +230,7 @@ class DashboardCharts {
                 this.boutDurationChart = new Chart(durationCtx, {
                     type: 'doughnut',
                     data: {
-                        labels: ['Mouse 1 (赤)', 'Mouse 2 (青)', 'Mouse 3 (黄)', 'Mouse 4 (黒)'],
+                        labels: ['Mouse 1 (赤)', 'Mouse 2 (青)', 'Mouse 3 (黄)', 'Mouse 4 (灰)'],
                         datasets: [{
                             data: dataDurations,
                             backgroundColor: [

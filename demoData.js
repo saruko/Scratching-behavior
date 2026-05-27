@@ -20,7 +20,7 @@ function generateDemoData() {
         1: { name: "赤", color: "hsl(354, 90%, 55%)", x: 200, y: 150, angle: 0, speed: 2.5, size: 45 },
         2: { name: "青", color: "hsl(210, 95%, 55%)", x: 600, y: 150, angle: Math.PI / 2, speed: 1.8, size: 42 },
         3: { name: "黄", color: "hsl(45, 95%, 50%)", x: 200, y: 400, angle: Math.PI, speed: 2.2, size: 46 },
-        4: { name: "黒", color: "hsl(220, 15%, 45%)", x: 600, y: 400, angle: -Math.PI / 2, speed: 1.2, size: 40 }
+        4: { name: "灰", color: "hsl(220, 15%, 45%)", x: 600, y: 400, angle: -Math.PI / 2, speed: 1.2, size: 40 }
     };
 
     const frames = [];

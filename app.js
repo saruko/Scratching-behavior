@@ -107,6 +107,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cfg.SCRATCH_MIN_VELOCITY)  SCRATCH_THRESHOLDS.minVelocity  = cfg.SCRATCH_MIN_VELOCITY;
         if (cfg.SCRATCH_MAX_HEAD_DIST) SCRATCH_THRESHOLDS.maxHeadDist = cfg.SCRATCH_MAX_HEAD_DIST;
         console.log("[Config] Loaded thresholds from backend:", SCRATCH_THRESHOLDS);
+
+        // 閾値ラベル（span:first-child）をサーバー値で更新する
+        // （HTML側は起動時デフォルトを表示しているが、サーバー設定優先）
+        const _updLabel = (id, text) => {
+            const el = document.getElementById(id);
+            if (el) { const s = el.querySelector('span:first-child'); if (s) s.textContent = text; }
+        };
+        _updLabel('stat-speed-l', `閾値: >${SCRATCH_THRESHOLDS.minVelocityMmS}mm/s`);
+        _updLabel('stat-speed-r', `閾値: >${SCRATCH_THRESHOLDS.minVelocityMmS}mm/s`);
+        _updLabel('stat-dist-l',  `閾値: <${SCRATCH_THRESHOLDS.maxHeadDistMm}mm`);
+        _updLabel('stat-dist-r',  `閾値: <${SCRATCH_THRESHOLDS.maxHeadDistMm}mm`);
+        // 閾値エディタ入力欄も最新値に同期
+        syncThresholdInputs();
     })
     .catch(err => {
         console.warn("[Config] Failed to fetch server config, using local default thresholds:", err);
@@ -160,6 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const pipelineRoiY1 = document.getElementById('pipeline-roi-y1');
     const pipelineRoiX2 = document.getElementById('pipeline-roi-x2');
     const pipelineRoiY2 = document.getElementById('pipeline-roi-y2');
+    const pipelineVideoPath = document.getElementById('pipeline-video-path');
     const pipelineStatusPanel = document.getElementById('pipeline-status-panel');
     const mockWarningBanner = document.getElementById('mock-warning-banner');
 
@@ -1662,6 +1676,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- 12.5 FastAPI pipeline integration Event handlers (NEW) ---
+
+    // パス入力欄に直接テキストを入力した場合もボタンを活性化する
+    // （動画をドロップせずにサーバーパスを手動入力するワークフロー向け）
+    if (pipelineVideoPath) {
+        pipelineVideoPath.addEventListener('input', () => {
+            const hasPath = pipelineVideoPath.value.trim().length > 0;
+            btnRunPipeline.disabled = !hasPath;
+            if (hasPath) {
+                btnRunPipeline.textContent = "解析パイプラインを実行";
+                btnRunPipeline.style.background = "rgba(168, 85, 247, 0.15)";
+                btnRunPipeline.style.borderColor = "#A855F7";
+            } else {
+                btnRunPipeline.textContent = "解析実行 (動画選択後に有効)";
+                btnRunPipeline.style.background = "";
+                btnRunPipeline.style.borderColor = "";
+            }
+        });
+    }
+
     btnRunPipeline.addEventListener('click', () => {
         // 新設された入力欄からパスを取得し、なければ dataset からのフォールバックを使用
         const inputVideoPath = document.getElementById('pipeline-video-path');
@@ -1878,20 +1911,32 @@ document.addEventListener('DOMContentLoaded', () => {
                 pipelineStatusPanel.textContent = data.log_full;
                 pipelineStatusPanel.scrollTop = pipelineStatusPanel.scrollHeight;
 
-                // Extract [Progress: XX%] if present in logs
-                const progressMatch = data.log_full.match(/\[Progress:\s*(\d+)%\]/g);
-                if (progressMatch) {
-                    const lastMatch = progressMatch[progressMatch.length - 1];
-                    const pct = parseInt(lastMatch.match(/(\d+)/)[0]);
-                    if (pct > 0) {
-                        appState.isRealProgress = true; // Q-4: Mark that we are using real progress
-                        if (appState.analysisProgressTimer) {
-                            clearInterval(appState.analysisProgressTimer);
-                            appState.analysisProgressTimer = null;
-                        }
-                        analysisProgressBar.style.width = `${pct}%`;
-                        analysisProgressPct.textContent = `${pct}%`;
+                // ── 進捗パーセント抽出（2パターンに対応） ──────────────────────
+                // パターン1: pipeline.py の明示出力 → [Progress: XX%]
+                // パターン2: DLC/tqdm の標準出力 → "8%|█| 5931/71961"（\rで上書きされるため最後の行から抽出）
+                let extractedPct = null;
+                const explicitMatch = data.log_full.match(/\[Progress:\s*(\d+)%\]/g);
+                if (explicitMatch) {
+                    const last = explicitMatch[explicitMatch.length - 1];
+                    extractedPct = parseInt(last.match(/(\d+)/)[0]);
+                }
+                if (extractedPct === null) {
+                    // tqdm 形式: 行頭の "XX%" を全行から探し最後の値を採用
+                    const tqdmMatches = data.log_full.match(/(?:^|\n|\r)\s*(\d+)%\s*[|│▏▎▍▌▋▊▉█]/gm);
+                    if (tqdmMatches) {
+                        const last = tqdmMatches[tqdmMatches.length - 1];
+                        const m = last.match(/(\d+)%/);
+                        if (m) extractedPct = parseInt(m[1]);
                     }
+                }
+                if (extractedPct !== null && extractedPct > 0) {
+                    appState.isRealProgress = true; // Q-4: 実進捗が取得できた場合は擬似アニメを停止
+                    if (appState.analysisProgressTimer) {
+                        clearInterval(appState.analysisProgressTimer);
+                        appState.analysisProgressTimer = null;
+                    }
+                    analysisProgressBar.style.width = `${extractedPct}%`;
+                    analysisProgressPct.textContent = `${extractedPct}%`;
                 }
 
                 if (data.status === "completed") {
@@ -2852,7 +2897,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (thrMinVelMms) thrMinVelMms.value = SCRATCH_THRESHOLDS.minVelocityMmS;
         if (thrMaxHeadMm) thrMaxHeadMm.value = SCRATCH_THRESHOLDS.maxHeadDistMm;
         if (thrMinOsc)    thrMinOsc.value    = SCRATCH_THRESHOLDS.minOscillations;
-        if (thrMinOscAmp) thrMinOscAmp.value = SCRATCH_THRESHOLDS.minOscAmplitudePx;
+        if (thrMinOscAmp) thrMinOscAmp.value = SCRATCH_THRESHOLDS.minOscAmplitudeMm;
     }
     syncThresholdInputs();
 
@@ -2868,7 +2913,7 @@ document.addEventListener('DOMContentLoaded', () => {
             SCRATCH_THRESHOLDS.minVelocityMmS    = newMinVel;
             SCRATCH_THRESHOLDS.maxHeadDistMm     = newMaxHead;
             SCRATCH_THRESHOLDS.minOscillations   = newMinOsc;
-            SCRATCH_THRESHOLDS.minOscAmplitudePx = newMinAmp;
+            SCRATCH_THRESHOLDS.minOscAmplitudeMm = newMinAmp;
 
             // バックエンドへも反映 (失敗してもフロント側計算は続行)
             fetch('/api/config-update', {
@@ -2878,7 +2923,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     SCRATCH_MIN_VELOCITY_MM_S:    newMinVel,
                     SCRATCH_MAX_HEAD_DIST_MM:     newMaxHead,
                     SCRATCH_MIN_OSCILLATIONS:     newMinOsc,
-                    SCRATCH_MIN_OSC_AMPLITUDE_PX: newMinAmp,
+                    SCRATCH_MIN_OSC_AMPLITUDE_MM: newMinAmp,
                 })
             }).catch(err => console.warn('[Config] サーバ閾値同期失敗:', err));
 
@@ -2893,7 +2938,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderBoutsList();
             charts.updateAnalytics(appState.data.bouts);
             updateUIForFrame(false);
-            alert(`✓ 閾値を適用して全フレーム再計算しました。\n  最小速度: ${newMinVel} mm/s\n  最大耳距離: ${newMaxHead} mm\n  最小振動: ${newMinOsc}\n  最小振幅: ${newMinAmp} px`);
+            alert(`✓ 閾値を適用して全フレーム再計算しました。\n  最小速度: ${newMinVel} mm/s\n  後肢↔耳 間距離上限: ${newMaxHead} mm\n  最小振動: ${newMinOsc}\n  最小振幅: ${newMinAmp} mm`);
         });
     }
 

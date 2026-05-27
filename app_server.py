@@ -91,7 +91,8 @@ class ConfigUpdateRequest(BaseModel):
     SCRATCH_MIN_VELOCITY_MM_S: Optional[float] = None
     SCRATCH_MAX_HEAD_DIST_MM: Optional[float] = None
     SCRATCH_MIN_OSCILLATIONS: Optional[int] = None
-    SCRATCH_MIN_OSC_AMPLITUDE_PX: Optional[float] = None
+    SCRATCH_MIN_OSC_AMPLITUDE_MM: Optional[float] = None
+    SCRATCH_MIN_OSC_AMPLITUDE_PX: Optional[float] = None  # 後方互換（旧クライアント向け）
     SCRATCH_VELOCITY_SMOOTH_FRAMES: Optional[int] = None
     SCRATCH_WINDOW_FRAMES: Optional[int] = None
     BOUT_MIN_FRAMES: Optional[int] = None

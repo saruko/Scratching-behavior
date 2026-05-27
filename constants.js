@@ -50,7 +50,7 @@ const MOUSE_COLOR_PALETTE = {
     1: { hex: "#EF4444", name: "赤",   cssVar: "--color-mouse-1", glowRgb: "239, 68, 68"   },
     2: { hex: "#3B82F6", name: "青",   cssVar: "--color-mouse-2", glowRgb: "59, 130, 246"  },
     3: { hex: "#EAB308", name: "黄",   cssVar: "--color-mouse-3", glowRgb: "234, 179, 8"   },
-    4: { hex: "#9CA3AF", name: "黒",   cssVar: "--color-mouse-4", glowRgb: "156, 163, 175" },
+    4: { hex: "#9CA3AF", name: "灰",   cssVar: "--color-mouse-4", glowRgb: "156, 163, 175" },
     5: { hex: "#F0F0F0", name: "白",   cssVar: "--color-mouse-5", glowRgb: "240, 240, 240" },
     6: { hex: "#F97316", name: "橙",   cssVar: "--color-mouse-6", glowRgb: "249, 115, 22"  },
     7: { hex: "#22C55E", name: "緑",   cssVar: "--color-mouse-7", glowRgb: "34, 197, 94"   },
