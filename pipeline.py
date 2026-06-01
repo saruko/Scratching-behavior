@@ -12,10 +12,14 @@ import os
 import sys
 import json
 import argparse
+from typing import Optional
 import numpy as np
 import pandas as pd
 
-from config import KEYPOINTS, DEFAULT_FPS, CAGE_MICE_COUNT, MAX_MICE_LIMIT
+from config import (
+    KEYPOINTS, DEFAULT_FPS, CAGE_MICE_COUNT, MAX_MICE_LIMIT,
+    BODY_LENGTH_MIN_MM, BODY_LENGTH_MAX_MM,
+)
 import color_id
 import feature_extraction
 import pose_engine
@@ -65,25 +69,22 @@ def create_mock_sleap_data(n_frames: int = 150, mice_count: int = 0) -> pd.DataF
 
     for f in range(n_frames):
         for track_id, (cx, cy) in centers.items():
-            dx = 0
-            dy = 0
-            
             row = {
                 "frame_idx": f,
                 "track": track_id,
                 "is_mock": 1
             }
-            
+
             # 各キーポイントにノイズと動きを付与
             for kp, (ox, oy) in kp_offsets.items():
-                kp_x = cx + dx + ox
-                kp_y = cy + dy + oy
-                
+                kp_x = cx + ox
+                kp_y = cy + oy
+
                 # 特定のフレーム（例えば 60-90フレーム目）で、左後ろ足を素早く振動させてひっかきをシミュレート
                 if kp == "left_hind_paw" and track_id == "track_0" and 60 <= f <= 90:
                     # 耳に近づける
-                    ear_x = cx + dx + kp_offsets["left_ear"][0]
-                    ear_y = cy + dy + kp_offsets["left_ear"][1]
+                    ear_x = cx + kp_offsets["left_ear"][0]
+                    ear_y = cy + kp_offsets["left_ear"][1]
                     kp_x = ear_x + 5 + 35 * (f % 2) # X軸方向に大きく高速振動！
                     kp_y = ear_y + 10 + 10 * ((f // 2) % 2)
                 
@@ -160,12 +161,84 @@ def long_to_wide_format(long_df: pd.DataFrame) -> pd.DataFrame:
     return wide_df
 
 
+def load_cage_mask(mask_path: Optional[str]) -> Optional[dict]:
+    """
+    Layer 1: ケージマスク JSON を読み込んで返す。
+    マスクが指定されていない、または読込失敗時は None を返し、本処理はマスクを使わない。
+
+    返す dict 形式:
+        {
+            "polygons": [ [(x,y), (x,y), ...], ... ],  # 各多角形は (x,y) タプルのリスト
+            "video_width": int,
+            "video_height": int,
+        }
+    """
+    if not mask_path:
+        return None
+    if not os.path.exists(mask_path):
+        print(f"[pipeline] [Cage-Mask] [Warning] マスクファイルが見つかりません: {mask_path}")
+        return None
+    try:
+        with open(mask_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        polys_raw = raw.get("exclude_polygons", [])
+        # 各多角形は [[x,y], [x,y], ...] のリスト → (x,y) タプルのリストに変換
+        polys = [[(float(p[0]), float(p[1])) for p in poly] for poly in polys_raw if len(poly) >= 3]
+        if not polys:
+            print(f"[pipeline] [Cage-Mask] [Warning] 有効な多角形が見つかりません: {mask_path}")
+            return None
+        print(f"[pipeline] [Cage-Mask] {len(polys)} 個の除外多角形を読み込みました: {mask_path}")
+        return {
+            "polygons": polys,
+            "video_width": int(raw.get("video_width", 0)),
+            "video_height": int(raw.get("video_height", 0)),
+        }
+    except Exception as e:
+        print(f"[pipeline] [Cage-Mask] [Warning] マスク読込失敗 → マスク無効化: {e}")
+        return None
+
+
+def point_in_polygon(x: float, y: float, polygon: list) -> bool:
+    """
+    Ray casting アルゴリズムによる点-多角形包含判定。
+    polygon: [(x1, y1), (x2, y2), ...] (タプルのリスト)
+
+    マスク領域は通常少数 (~1〜5個) なので numpy 化せずシンプル実装で十分。
+    """
+    n = len(polygon)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        # 半直線が辺と交差するかチェック
+        if ((yi > y) != (yj > y)) and \
+           (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def is_point_in_mask(x: float, y: float, mask: Optional[dict]) -> bool:
+    """点 (x, y) がマスクの除外多角形のいずれかに含まれるかを返す。マスクが None の場合は常に False。"""
+    if mask is None:
+        return False
+    for poly in mask["polygons"]:
+        if point_in_polygon(x, y, poly):
+            return True
+    return False
+
+
 def build_preview_json(
     pose_df: pd.DataFrame,
     fps: float,
     video_path: str,
     preview_duration_s: float,
     sample_interval_s: float = 1.0,
+    pixel_to_mm_ratio: Optional[float] = None,
+    cage_mask: Optional[dict] = None,
 ) -> dict:
     """
     初期化確認モード用プレビュー JSON を生成する。
@@ -179,6 +252,24 @@ def build_preview_json(
     研究者が任意のフレームで各マウスに ID を割り当てて確認できる。
     """
     BBOX_PAD = 20  # バウンディングボックスのパディング (px)
+    # ── 誤検出フィルタリング閾値（Layer 3: 解剖学的妥当性チェック） ─────────────
+    # DLC SuperAnimal 等のゼロショットモデルは、ケージ装置（給水器・餌器・配管など）を
+    # マウスとして誤認識することがある。これらの誤検出は以下の特徴がある:
+    #   1. 平均キーポイント信頼度が低い (典型的に 0.3 未満)
+    #   2. 有効キーポイント数が少ない (装置の一部しか「マウスっぽく」見えないため)
+    #   3. bbox のアスペクト比がマウスらしくない (装置は正方形/円形が多い)
+    #   4. 体長 (neck-tail_base 距離) が成体マウスの範囲を逸脱
+    # 多段フィルタで明らかな誤検出をプレビューから除外する。
+    MIN_AVG_KP_CONF      = 0.25  # 検出全体の平均キーポイント信頼度の下限
+    MIN_VALID_KP_COUNT   = 4     # 有効キーポイント数の下限 (KEYPOINTS の約 1/3 以上)
+    # bbox アスペクト比: マウスは細長い (1:1.2〜1:4 程度)。正方形に近い装置検出を除外する
+    # 比率は max(w,h) / min(w,h) で計算。1.05 未満 = ほぼ正方形 → 装置の可能性大
+    MIN_BBOX_ELONGATION  = 1.05  # 最低でもこの程度の縦横比を要求（緩めに設定）
+    # 体長レンジ (px): config.BODY_LENGTH_*_MM を pixel_to_mm_ratio で換算した値。
+    # build_preview_json は px_to_mm を引数で受けないので、引数で受け取った値を使う。
+    # 値が指定されない場合は体長チェックをスキップ。
+    _body_min_mm = BODY_LENGTH_MIN_MM
+    _body_max_mm = BODY_LENGTH_MAX_MM
 
     # 動画の実解像度を取得（フロントエンドでの座標変換に使用）
     # NOTE: 正しい OpenCV プロパティ名は CAP_PROP_FRAME_WIDTH/HEIGHT。
@@ -201,6 +292,8 @@ def build_preview_json(
     sampled_frames = list(range(0, max_frame + 1, step))
 
     frames_dict = {}
+    skipped_low_conf = 0  # 解剖学的妥当性チェックで除外された検出数（ログ用）
+    skipped_mask     = 0  # ケージマスクで除外された検出数（ログ用）
     for frame_idx in sampled_frames:
         rows = pose_df[pose_df["frame_idx"] == frame_idx]
         if rows.empty:
@@ -224,6 +317,16 @@ def build_preview_json(
                     round(max(ys) + BBOX_PAD, 1),
                 ]
 
+            # ── Layer 1: ケージマスク除外 ───────────────────────────────────
+            # bbox 中心がマスク多角形内にあれば、装置の誤検出とみなしてスキップ。
+            # bbox が無い (キーポイント数<2) 場合は後段の解剖学チェックで弾かれる。
+            if cage_mask is not None and bbox is not None:
+                bcx = (bbox[0] + bbox[2]) * 0.5
+                bcy = (bbox[1] + bbox[3]) * 0.5
+                if is_point_in_mask(bcx, bcy, cage_mask):
+                    skipped_mask += 1
+                    continue
+
             # キーポイント辞書（x, y, conf）
             kps_out = {}
             for kp in KEYPOINTS:
@@ -235,6 +338,43 @@ def build_preview_json(
                         "conf": round(float(row[ccol]) if (ccol in row.index and not pd.isna(row.get(ccol))) else 0.5, 3),
                     }
 
+            # ── 誤検出フィルタ ─────────────────────────────────────────────
+            # ケージ装置などをマウスと誤認識した検出を除外する。多段判定:
+            #   (A) 有効キーポイント数: 装置の部分検出（数点のみ）を除外
+            #   (B) 平均キーポイント信頼度: 低信頼度の誤検出を除外
+            #   (C) bbox アスペクト比: 正方形/円形の装置検出を除外
+            #   (D) 体長レンジ: 成体マウスの体長範囲外を除外
+            reject_reason = None
+            if len(kps_out) < MIN_VALID_KP_COUNT:
+                reject_reason = f"few_kps({len(kps_out)}<{MIN_VALID_KP_COUNT})"
+            else:
+                avg_conf = sum(kp["conf"] for kp in kps_out.values()) / len(kps_out)
+                if avg_conf < MIN_AVG_KP_CONF:
+                    reject_reason = f"low_conf({avg_conf:.2f}<{MIN_AVG_KP_CONF})"
+                elif bbox is not None:
+                    # (C) bbox アスペクト比チェック
+                    bw = max(1e-6, bbox[2] - bbox[0])
+                    bh = max(1e-6, bbox[3] - bbox[1])
+                    elongation = max(bw, bh) / min(bw, bh)
+                    if elongation < MIN_BBOX_ELONGATION:
+                        reject_reason = f"too_square(elong={elongation:.2f})"
+                    # (D) 体長レンジチェック (pixel_to_mm_ratio が指定された場合のみ)
+                    elif pixel_to_mm_ratio is not None and pixel_to_mm_ratio > 0 \
+                            and "neck" in kps_out and "tail_base" in kps_out:
+                        nx, ny = kps_out["neck"]["x"], kps_out["neck"]["y"]
+                        tx, ty = kps_out["tail_base"]["x"], kps_out["tail_base"]["y"]
+                        body_px = float(np.hypot(tx - nx, ty - ny))
+                        body_mm = body_px * pixel_to_mm_ratio
+                        if body_mm < _body_min_mm:
+                            reject_reason = f"body_too_short({body_mm:.0f}mm<{_body_min_mm}mm)"
+                        elif body_mm > _body_max_mm:
+                            reject_reason = f"body_too_long({body_mm:.0f}mm>{_body_max_mm}mm)"
+            if reject_reason is not None:
+                skipped_low_conf += 1
+                continue
+            # avg_conf を後段の detection に含めるため再計算（reject されなかった場合のみ）
+            avg_conf = sum(kp["conf"] for kp in kps_out.values()) / len(kps_out)
+
             mouse_id = None
             if "mouse_id" in row.index and not pd.isna(row.get("mouse_id")):
                 mouse_id = int(row["mouse_id"])
@@ -244,12 +384,26 @@ def build_preview_json(
                 "mouse_id": mouse_id,          # カラーID自動推定値（参考）
                 "bbox": bbox,
                 "keypoints": kps_out,
+                "avg_conf": round(avg_conf, 3),  # デバッグ用: 平均信頼度
             })
 
         frames_dict[str(frame_idx)] = {
             "timestamp_s": round(frame_idx / fps, 3),
             "detections": detections,
         }
+
+    # フィルタ統計をログ出力（誤検出の発生頻度を研究者が把握できるように）
+    if skipped_mask > 0:
+        print(f"[pipeline] [Preview-Filter] ケージマスクで {skipped_mask} 件の装置誤検出を除外しました。")
+    if skipped_low_conf > 0:
+        print(f"[pipeline] [Preview-Filter] 解剖学的妥当性チェックで {skipped_low_conf} 件の検出を "
+              f"プレビューから除外しました。閾値:")
+        print(f"[pipeline]   - 有効KP数 >= {MIN_VALID_KP_COUNT}, 平均信頼度 >= {MIN_AVG_KP_CONF}")
+        print(f"[pipeline]   - bbox 縦横比 >= {MIN_BBOX_ELONGATION} (正方形検出を除外)")
+        if pixel_to_mm_ratio is not None and pixel_to_mm_ratio > 0:
+            print(f"[pipeline]   - 体長 (neck→tail_base) ∈ [{_body_min_mm}, {_body_max_mm}] mm")
+        else:
+            print(f"[pipeline]   - 体長レンジチェック: 無効 (pixel_to_mm_ratio 未指定)")
 
     return {
         "video": os.path.basename(video_path),
@@ -261,6 +415,168 @@ def build_preview_json(
         "sampled_frames": sampled_frames,
         "frames": frames_dict,
     }
+
+
+def _collect_library_versions() -> dict:
+    """解析に関与する主要ライブラリのバージョンを収集する（best-effort）。"""
+    import platform
+    versions = {"python": platform.python_version()}
+    for mod_name, key in [
+        ("numpy", "numpy"), ("pandas", "pandas"), ("cv2", "opencv"),
+        ("torch", "torch"), ("ultralytics", "ultralytics"),
+        ("deeplabcut", "deeplabcut"), ("sleap", "sleap"), ("h5py", "h5py"),
+    ]:
+        try:
+            mod = __import__(mod_name)
+            versions[key] = getattr(mod, "__version__", "unknown")
+        except Exception:
+            pass  # 未インストールのライブラリは記録しない
+    return versions
+
+
+def _get_git_commit() -> Optional[str]:
+    """現在の git コミットハッシュを取得する（リポジトリ外・git 未導入なら None）。"""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+# 各出力CSVの列の意味を機械可読・人間可読の両方で残すためのデータ辞書。
+# 解析結果CSV単体では各列が物理的に何を表すか（単位・算出式）が判別できないため、
+# 結果と同じディレクトリに列定義CSVを書き出し、学術的な再現性とレビュー容易性を担保する。
+# ここでの定義は feature_extraction.py の実装（compute_summary_stats / detect_scratch_bouts）
+# と厳密に一致させること。実装を変更した場合は本辞書も同時に更新する。
+COLUMN_DEFINITIONS = [
+    # file, column, unit, description(JA), formula
+    # ── サマリー統計 (_summary.csv): 個体ごとに観察時間で正規化した集計値 ──
+    ("summary", "mouse_id", "-", "個体識別ID（色＋尾の帯本数で割り当て）。0は未解決ID。", "color_id による割当"),
+    ("summary", "observation_duration_s", "秒", "観察時間。姿勢データが存在するフレーム範囲の総時間。", "(最終frame_idx - 最初frame_idx + 1) / fps"),
+    ("summary", "observation_duration_min", "分", "観察時間（分）。各種レートの分母。", "observation_duration_s / 60"),
+    ("summary", "n_bouts", "回", "スクラッチbout（連続したひっかき動作のまとまり）の検出総数。", "その個体のbout行数"),
+    ("summary", "total_scratch_duration_s", "秒", "全boutの合計時間。観察中に実際にひっかいていた総時間。", "Σ bout_duration_s"),
+    ("summary", "scratch_rate_bouts_per_min", "回/分", "ひっかき頻度。1分あたり何回のboutが起きたか（観察時間で正規化）。", "n_bouts / observation_duration_min"),
+    ("summary", "scratch_rate_s_per_min", "秒/分", "ひっかき強度。1分あたり何秒ひっかいていたか（観察時間で正規化）。", "total_scratch_duration_s / observation_duration_min"),
+    ("summary", "mean_bout_duration_s", "秒", "1回のboutの平均持続時間。", "mean(bout_duration_s)"),
+    ("summary", "sem_bout_duration_s", "秒", "bout持続時間の標準誤差（個体内ばらつきの指標）。", "std(bout_duration_s) / sqrt(n_bouts)"),
+    ("summary", "median_bout_duration_s", "秒", "bout持続時間の中央値（外れ値に頑健な代表値）。", "median(bout_duration_s)"),
+    ("summary", "longest_bout_s", "秒", "最も長く続いた単一boutの持続時間。", "max(bout_duration_s)"),
+    ("summary", "fps_used", "フレーム/秒", "時間換算に用いた動画のフレームレート。", "動画メタデータ由来"),
+    # ── Bout情報 (_bouts.csv): 検出された個々のスクラッチboutの明細 ──
+    ("bouts", "mouse_id", "-", "個体識別ID。", "color_id による割当"),
+    ("bouts", "bout_id", "-", "その個体内でのbout連番。", "0始まりの通し番号"),
+    ("bouts", "bout_start_frame", "フレーム", "boutの開始フレーム番号。", "-"),
+    ("bouts", "bout_end_frame", "フレーム", "boutの終了フレーム番号。", "-"),
+    ("bouts", "bout_start_time_s", "秒", "bout開始時刻。", "bout_start_frame / fps"),
+    ("bouts", "bout_end_time_s", "秒", "bout終了時刻。", "bout_end_frame / fps"),
+    ("bouts", "bout_duration_s", "秒", "boutの持続時間。", "bout_n_frames / fps"),
+    ("bouts", "bout_n_frames", "フレーム", "boutを構成するフレーム数。", "bout_end_frame - bout_start_frame + 1"),
+    ("bouts", "fps_used", "フレーム/秒", "時間換算に用いたフレームレート。", "動画メタデータ由来"),
+]
+
+
+def write_column_definitions(path: str) -> None:
+    """
+    出力CSV（summary / bouts）各列の意味・単位・算出式を記したデータ辞書CSVを書き出す。
+
+    解析結果CSVを後から人間が検証・査読する際に、各列が物理的に何を表すかを
+    同梱ファイルで即座に参照できるようにするためのもの。データ本体のCSVスキーマは
+    機械可読性を保つため変更せず、説明は本サイドカーCSVに分離する。
+    """
+    cols_df = pd.DataFrame(
+        COLUMN_DEFINITIONS,
+        columns=["出力ファイル", "列名", "単位", "意味", "算出式"],
+    )
+    cols_df.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def write_provenance_manifest(manifest_path: str, args, fps: float,
+                              output_files: dict,
+                              id_quality: dict = None) -> None:
+    """
+    [A-4] 再現性のためのプロベナンス manifest を JSON で書き出す。
+
+    解析結果 CSV 単体では「どの閾値・校正値・エンジン・バージョンで生成されたか」が
+    判別できないため、結果と同じディレクトリに manifest を残す。学術論文の Methods
+    記載および結果の再現に必要な全パラメータを 1 ファイルに集約する。
+    """
+    import datetime
+    import config  # 実行時にオーバーライドされた可能性があるため live 値を読む
+
+    manifest = {
+        "schema": "mouse-scratch-provenance/v1",
+        "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "input": {
+            "video": os.path.basename(args.video),
+            "video_abspath": os.path.abspath(args.video) if os.path.exists(args.video) else args.video,
+            "sleap_h5": args.sleap,
+        },
+        "pose_estimation": {
+            "engine": args.engine,
+            "model_path": args.model_path,
+            "device": args.device,
+            "dlc_superanimal": args.dlc_superanimal if args.engine == "dlc" else None,
+            "dlc_detector": args.dlc_detector if args.engine == "dlc" else None,
+            "dlc_pose_model": args.dlc_pose_model if args.engine == "dlc" else None,
+            "dlc_max_individuals": (args.dlc_max_individuals or args.mice_count or 4) if args.engine == "dlc" else None,
+        },
+        "calibration": {
+            "pixel_to_mm_ratio": args.px_to_mm,
+            "pixel_to_mm_is_default": bool(abs(args.px_to_mm - 0.25) < 1e-9),
+            "fps": fps,
+            "mice_count": args.mice_count,
+            "roi": (
+                {"x1": args.roi_x1, "y1": args.roi_y1, "x2": args.roi_x2, "y2": args.roi_y2}
+                if all(v is not None for v in [args.roi_x1, args.roi_y1, args.roi_x2, args.roi_y2])
+                else None
+            ),
+            "cage_mask": args.cage_mask,
+        },
+        "scratch_thresholds": {
+            "SCRATCH_MIN_VELOCITY_MM_S":      config.SCRATCH_MIN_VELOCITY_MM_S,
+            "SCRATCH_MAX_HEAD_DIST_MM":       config.SCRATCH_MAX_HEAD_DIST_MM,
+            "SCRATCH_MIN_OSCILLATIONS":       config.SCRATCH_MIN_OSCILLATIONS,
+            "SCRATCH_MIN_OSC_AMPLITUDE_MM":   config.SCRATCH_MIN_OSC_AMPLITUDE_MM,
+            "SCRATCH_VELOCITY_SMOOTH_FRAMES": config.SCRATCH_VELOCITY_SMOOTH_FRAMES,
+            "SCRATCH_WINDOW_FRAMES":          config.SCRATCH_WINDOW_FRAMES,
+            "BOUT_MIN_FRAMES":                config.BOUT_MIN_FRAMES,
+            "BOUT_MERGE_GAP":                 config.BOUT_MERGE_GAP,
+            "INTERPOLATION_MAX_GAP":          config.INTERPOLATION_MAX_GAP,
+            "MIN_CONFIDENCE":                 config.MIN_CONFIDENCE,
+            "HIND_PAW_MIN_CONF":              config.HIND_PAW_MIN_CONF,
+        },
+        "anatomical_checks": {
+            "ENABLE_ANATOMICAL_CHECKS":  config.ENABLE_ANATOMICAL_CHECKS,
+            "BODY_LENGTH_MIN_MM":        config.BODY_LENGTH_MIN_MM,
+            "BODY_LENGTH_MAX_MM":        config.BODY_LENGTH_MAX_MM,
+            "MAX_TELEPORT_BODY_LENGTHS": config.MAX_TELEPORT_BODY_LENGTHS,
+        },
+        "environment": {
+            "library_versions": _collect_library_versions(),
+            "git_commit": _get_git_commit(),
+            "working_directory": os.getcwd(),
+        },
+        "outputs": output_files,
+        # [A-3] カラーID品質サマリー（個体別平均信頼度・Swap件数など）
+        "color_id_quality": id_quality if id_quality else None,
+    }
+
+    try:
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        print(f"[pipeline] プロベナンス manifest 保存完了: {manifest_path}")
+        if manifest["calibration"]["pixel_to_mm_is_default"]:
+            print("[pipeline] [Warning] ⚠️ manifest に記録された px-to-mm はデフォルト値です（未校正）。")
+    except Exception as e:
+        print(f"[pipeline] [Warning] manifest 書き出しに失敗しました: {e}")
 
 
 def main():
@@ -276,6 +592,9 @@ def main():
                         help="DLC SuperAnimal の物体検出器モデル名 (デフォルト: fasterrcnn_resnet50_fpn_v2)")
     parser.add_argument("--dlc-pose-model", type=str, default="hrnet_w32",
                         help="DLC SuperAnimal のポーズ推定モデル名 (デフォルト: hrnet_w32)")
+    parser.add_argument("--dlc-max-individuals", type=int, default=0,
+                        help="DLC SuperAnimal multi-animal 推論の最大個体数。"
+                             "0 = --mice-count を流用 (それも 0 なら 4)。集団飼育の頭数と一致させること。")
     parser.add_argument("--out_dir", type=str, default="outputs", help="CSV結果を出力するディレクトリ")
     parser.add_argument("--fps", type=int, default=None, help="動画のFPS設定 (configのデフォルト値をオーバーライド)")
     parser.add_argument("--px-to-mm", type=float, default=0.25, help="ピクセルからミリメートルへのキャリブレーション比率 (mm/pixel)")
@@ -305,6 +624,9 @@ def main():
     #                      指定するとカラーID自動分類をスキップしてこのマッピングを使用する。
     parser.add_argument("--confirmed-mapping", type=str, default=None,
                         help='研究者確認済み track→mouse_id マッピング (JSON文字列: {"track_0": 1, ...})')
+    parser.add_argument("--cage-mask", type=str, default=None,
+                        help="Layer 1 ケージマスク JSON (outputs/<videoname>_cage_mask.json) のパス。"
+                             "多角形内に bbox 中心を持つ検出は装置誤検出として除外される。")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"],
                         help="推論デバイスを明示指定 (cuda / cpu)。省略時は GPU 互換性を自動判定して選択。"
                              "RTX 5080 など新世代 GPU を確実に使いたい場合は --device cuda を明示することで"
@@ -376,12 +698,16 @@ def main():
         elif args.engine == "yolov8":
             engine = pose_engine.Yolov8PoseEngine(model_path=args.model_path, device=device_override)
         elif args.engine == "dlc":
+            # multi-animal 上限の決定: --dlc-max-individuals 優先、未指定(0)なら --mice-count、
+            # それも 0 なら 4（典型的な集団飼育頭数）にフォールバック。
+            _dlc_max_ind = args.dlc_max_individuals or args.mice_count or 4
             engine = pose_engine.DeepLabCutEngine(
                 model_path=args.model_path,
                 device=device_override,
                 superanimal_name=args.dlc_superanimal,
                 detector_name=args.dlc_detector,
                 pose_model_name=args.dlc_pose_model,
+                max_individuals=_dlc_max_ind,
             )
         else:
             engine = pose_engine.MockPoseEngine(model_path=args.model_path, device=device_override)
@@ -447,6 +773,27 @@ def main():
         
     print(f"[pipeline] 初期ロードデータ数: {len(pose_df)} 行")
 
+    # ── Layer 1: ケージマスクをロード ─────────────────────────────────────
+    # マスクが指定されていれば、ポーズデータからマスク内のキーポイント中心を持つ
+    # 検出行を除外する。これにより装置誤検出が後段の特徴量抽出にも残らない。
+    cage_mask = load_cage_mask(args.cage_mask)
+    if cage_mask is not None and not pose_df.empty:
+        # bbox 中心の代理として spine_mid (なければ head_center, さらに無ければ neck) を使う
+        # 各行のキーポイント中心を計算 → 多角形内なら除外
+        def _row_in_mask(row):
+            for kp in ("spine_mid", "head_center", "neck", "tail_base"):
+                xc = row.get(f"{kp}_x"); yc = row.get(f"{kp}_y")
+                if xc is not None and yc is not None and not pd.isna(xc) and not pd.isna(yc):
+                    return is_point_in_mask(float(xc), float(yc), cage_mask)
+            return False
+        before_n = len(pose_df)
+        in_mask = pose_df.apply(_row_in_mask, axis=1)
+        pose_df = pose_df[~in_mask].copy()
+        removed = before_n - len(pose_df)
+        if removed > 0:
+            print(f"[pipeline] [Cage-Mask] {removed} 行 ({removed/before_n*100:.1f}%) の "
+                  f"マスク内検出を本解析データから除外しました。")
+
     # ── フェーズ1: プレビューモード（--preview-only 指定時） ─────────────────
     # 動画冒頭 preview_duration 秒分のみを解析し、バウンディングボックス付き JSON を
     # 出力して終了する。フロントエンドで研究者が確認後、/api/confirm_ids で本解析を開始する。
@@ -479,6 +826,8 @@ def main():
             pose_df_preview, fps, args.video,
             preview_duration_s=args.preview_duration,
             sample_interval_s=1.0,  # 1 秒ごとにサンプリング
+            pixel_to_mm_ratio=args.px_to_mm,  # 体長レンジチェックに使用
+            cage_mask=cage_mask,              # Layer 1: ケージ装置除外
         )
         preview_json_path = os.path.join(args.out_dir, f"{video_basename_p}_preview.json")
         with open(preview_json_path, "w", encoding="utf-8") as fp:
@@ -540,6 +889,10 @@ def main():
         )
         aligned_df = pose_df
 
+    # [A-3] カラーID品質レポートを取得する。feature_extraction が DataFrame をコピーすると
+    # .attrs が失われるため、特徴量抽出の前にここで退避しておく。
+    id_quality = dict(getattr(aligned_df, "attrs", {}).get("id_quality", {}))
+
     # 3. 特徴量抽出およびスクラッチ・Bout検出の実行
     print(f"\n[Progress: 80%] 特徴量抽出およびスクラッチ判定実行中...")
     print("\n--- [Step 2] 特徴量抽出およびスクラッチ判定実行中 ---")
@@ -571,6 +924,41 @@ def main():
     print(f"[pipeline] Bout情報CSV保存完了: {bouts_csv_path}")
     print(f"[pipeline] サマリー統計CSV保存完了: {summary_csv_path}")
     print(f"[pipeline] 総検出 Bout 数: {len(bouts_df)} 件")
+
+    # 各出力CSVの列の意味（単位・算出式）を記したデータ辞書CSVを同梱出力する。
+    columns_csv_path = os.path.join(args.out_dir, f"{video_basename}_columns.csv")
+    try:
+        write_column_definitions(columns_csv_path)
+        print(f"[pipeline] 列定義（データ辞書）CSV保存完了: {columns_csv_path}")
+    except Exception as e:
+        print(f"[pipeline] [Warning] 列定義CSVの書き出しに失敗しました: {e}")
+
+    # ── [A-3] カラーID品質レポート JSON 出力 ─────────────────────────────────
+    # フロントエンドが個体ごとのID信頼度・低信頼フレーム数・Swap（混同）イベントを
+    # 可視化できるよう、専用 JSON を結果CSVと同じディレクトリに書き出す。
+    id_quality_path = os.path.join(args.out_dir, f"{video_basename}_id_quality.json")
+    try:
+        with open(id_quality_path, "w", encoding="utf-8") as fp:
+            json.dump(id_quality, fp, ensure_ascii=False, indent=2)
+        n_swaps = id_quality.get("n_swap_events", 0)
+        print(f"[pipeline] カラーID品質レポート保存完了: {id_quality_path} (Swap検知: {n_swaps} 件)")
+    except Exception as e:
+        print(f"[pipeline] [Warning] カラーID品質レポート書き出しに失敗しました: {e}")
+
+    # ── [A-4] プロベナンス manifest 出力 ─────────────────────────────────────
+    # 結果CSVと同じディレクトリに、再現に必要な全パラメータを JSON で残す。
+    manifest_path = os.path.join(args.out_dir, f"{video_basename}_manifest.json")
+    write_provenance_manifest(
+        manifest_path, args, fps,
+        output_files={
+            "frame_labels_csv": os.path.basename(frame_csv_path),
+            "bouts_csv":        os.path.basename(bouts_csv_path),
+            "summary_csv":      os.path.basename(summary_csv_path),
+            "id_quality_json":  os.path.basename(id_quality_path),
+            "n_bouts":          int(len(bouts_df)),
+        },
+        id_quality=id_quality,
+    )
 
     # 5. グラウンドトゥルース評価（--gt 指定時のみ）
     if args.gt:

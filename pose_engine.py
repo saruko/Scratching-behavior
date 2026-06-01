@@ -438,6 +438,13 @@ class DeepLabCutEngine(BasePoseEngine):
         SuperAnimal の物体検出器。デフォルト "fasterrcnn_resnet50_fpn_v2"。
     pose_model_name : str
         SuperAnimal のポーズモデル。デフォルト "hrnet_w32"。
+    max_individuals : int
+        フレーム内の最大個体数（multi-animal 推論の上限）。SuperAnimal の
+        top-down 検出器はこの値で「1フレームあたり何個体まで検出するか」を決める。
+        集団飼育ケージでは頭数を必ず指定すること（例: 4匹なら 4）。
+        0 以下を渡した場合はデフォルト 4 として扱う。
+        ⚠️ 学術的注意: 過小指定すると一部個体が欠落し、過大指定すると床のシミ等を
+        誤検出して偽個体が混入する。実験のケージ内頭数と厳密に一致させること。
     """
 
     # SuperAnimal-TopViewMouse (27 点) → 内部 11 点マッピング
@@ -500,11 +507,14 @@ class DeepLabCutEngine(BasePoseEngine):
         superanimal_name: str = "superanimal_topviewmouse",
         detector_name: str = "fasterrcnn_resnet50_fpn_v2",
         pose_model_name: str = "hrnet_w32",
+        max_individuals: int = 4,
     ):
         super().__init__(model_path, device)
         self.superanimal_name = superanimal_name
         self.detector_name = detector_name
         self.pose_model_name = pose_model_name
+        # 集団飼育の頭数。0 以下はデフォルト 4 とみなす（誤指定でパイプラインが落ちないように）。
+        self.max_individuals = max_individuals if max_individuals and max_individuals > 0 else 4
 
         # model_path の解釈:
         #   - None             → SuperAnimal Model Zoo (zero-shot)
@@ -584,7 +594,11 @@ class DeepLabCutEngine(BasePoseEngine):
                     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
                     print(f"[pose_engine] [Info] DLC 推論デバイス: GPU (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '0')})")
 
-                # gputouse は DLC 2.x 互換引数として追加試行（TypeError の場合はスキップ）
+                # multi-animal 上限: 集団飼育の頭数を SuperAnimal の top-down 検出器に渡す。
+                # これが無いと既定値（1 もしくは過大値）で推論され、4匹中1匹しか検出されない／
+                # 偽個体が混入する等、ID 割当と頭数検証（color_id.py）が破綻する。
+                # DLC のバージョン差で引数名が異なるため、複数候補を順に試行する。
+                print(f"[pose_engine] [Info] multi-animal 上限 max_individuals={self.max_individuals} で推論します。")
                 _gpu_to_use = 0 if self.device != "cpu" else None
                 _dlc_kwargs = dict(
                     videos=[video_path],
@@ -593,20 +607,45 @@ class DeepLabCutEngine(BasePoseEngine):
                     detector_name=self.detector_name,
                     videotype=videotype,
                     dest_folder=dest_folder,
+                    max_individuals=self.max_individuals,
                 )
-                try:
-                    dlc.video_inference_superanimal(**_dlc_kwargs, gputouse=_gpu_to_use)
-                except TypeError:
-                    # DLC 3.x では gputouse を受け付けない場合 → 環境変数のみで制御
-                    print(f"[pose_engine] [Info] gputouse パラメータ非対応バージョン検出 — 環境変数で GPU 制御します。")
+                # 引数の互換性を段階的に縮退させて呼び出す（gputouse → max_individuals の順に外す）。
+                # DLC 3.x は gputouse 非対応、一部バージョンは max_individuals 非対応のため。
+                _attempts = [
+                    dict(gputouse=_gpu_to_use),  # 2.x 互換 + multi-animal
+                    dict(),                      # 3.x: 環境変数で GPU 制御 + multi-animal
+                ]
+                _last_err = None
+                _succeeded = False
+                for _extra in _attempts:
+                    try:
+                        dlc.video_inference_superanimal(**_dlc_kwargs, **_extra)
+                        _succeeded = True
+                        break
+                    except TypeError as _te:
+                        _last_err = _te
+                        # gputouse が原因なら次の試行（gputouse なし）で解消する
+                        continue
+                if not _succeeded:
+                    # max_individuals 自体が非対応の可能性 → これを外して最後の試行を行う
+                    print(f"[pose_engine] [Info] max_individuals 非対応バージョン検出 — 当該引数を外して再試行します。")
+                    _dlc_kwargs.pop("max_individuals", None)
                     dlc.video_inference_superanimal(**_dlc_kwargs)
 
-                # ⚠️ TopView モデルは paw キーポイントを持たないことを警告
+                # [注意] TopView モデルは paw キーポイントを持たないことを警告
+                # NOTE: 推論は上で既に完了している。この print は情報提供のみ。
+                # Windows の cp932 コンソール等で絵文字をエンコードできず UnicodeEncodeError が
+                # 発生すると、外側の except に捕捉されて「成功済みの DLC 結果を破棄して Mock へ
+                # フォールバック」する致命的な誤動作を起こす。よって (1) cp932 で表現可能な
+                # 文字のみ使用し、(2) print 自体を try でガードして推論結果を絶対に巻き戻さない。
                 if "topview" in self.superanimal_name.lower():
-                    print("[pose_engine] [Warning] ⚠️ 学術利用注意: SuperAnimal-TopViewMouse は paw キーポイントを"
-                          "含まないため、left_fore_paw / left_hind_paw 等は left_shoulder / left_hip の近似値です。"
-                          "解剖学的に厳密な解析には SuperAnimal-Quadruped (側面視点) または paw を含む"
-                          "カスタム学習モデルを使用してください。")
+                    try:
+                        print("[pose_engine] [Warning] [学術利用注意] SuperAnimal-TopViewMouse は paw キーポイントを"
+                              "含まないため、left_fore_paw / left_hind_paw 等は left_shoulder / left_hip の近似値です。"
+                              "解剖学的に厳密な解析には SuperAnimal-Quadruped (側面視点) または paw を含む"
+                              "カスタム学習モデルを使用してください。")
+                    except Exception:
+                        pass
             else:
                 # カスタム学習済み DLC プロジェクト
                 print(f"[pose_engine] [Info] DLC analyze_videos を実行: config={self.model_path}")
@@ -725,7 +764,19 @@ class DeepLabCutEngine(BasePoseEngine):
                 for bp in bodyparts:
                     # この bp が内部 11 点のどれにマップされるか
                     mapped_kp = kp_map.get(bp)
-                    if mapped_kp is None or mapped_kp not in KEYPOINTS:
+                    bp_norm = str(bp).lower()
+                    if mapped_kp is not None and mapped_kp in KEYPOINTS:
+                        # 通常の 11 点スケルトンキーポイント
+                        out_kp = mapped_kp
+                    elif bp_norm.startswith("tail"):
+                        # [B] 尾チェーン透過保持: DLC SuperAnimal-TopViewMouse は
+                        #     tail_base / tail1..tail5 / tail_end など複数の尾ノードを出力する。
+                        #     これらを「色＋帯本数」個体識別 (color_id.py) の尾折れ線サンプリングに
+                        #     使うため、元の名前 (小文字正規化) のままロングフォーマットへ透過させる。
+                        #     11 点スケルトンには含まれないため feature_extraction では無視され、
+                        #     スクラッチ判定の物理計算には一切干渉しない（非干渉プラミング）。
+                        out_kp = bp_norm
+                    else:
                         continue
 
                     try:
@@ -741,7 +792,7 @@ class DeepLabCutEngine(BasePoseEngine):
                     records.append({
                         "frame":    int(f_idx),
                         "track":    track_name,
-                        "keypoint": mapped_kp,
+                        "keypoint": out_kp,
                         "x":        float(x) if valid else np.nan,
                         "y":        float(y) if valid else np.nan,
                         "conf":     rec_conf,

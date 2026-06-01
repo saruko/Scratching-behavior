@@ -15,8 +15,13 @@ httpx>=0.27.0
 # GPU (CUDA): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # CPU only:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 #
-# ── オプション: DeepLabCut Model Zoo (SuperAnimal-TopViewMouse / Quadruped) ──
-# 学習済みマウス専用モデルを zero-shot で使う場合、以下を別途インストール:
+# ── 俯瞰マウス姿勢推定: DeepLabCut Model Zoo (SuperAnimal-TopViewMouse) ──
+# 黒色マウスの集団飼育を真上から撮影した動画では、汎用 YOLOv8(人体COCO) は
+# マウスを検出できないため、マウス専用の SuperAnimal-TopViewMouse を zero-shot で使う。
+# 重い依存 (PyTorch / hrnet 等) を含むため、導入は明示的に行うこと（自動実行はしない）:
 #   pip install 'deeplabcut[modelzoo,pytorch]'>=3.0.0
-# DLC は重い依存 (TensorFlow / PyTorch / hrnet 等) を含むため、必要な場合のみ導入する。
-# YOLOv8 / SLEAP で十分な場合はインストール不要。
+# 実行例:
+#   python pipeline.py --video <動画> --engine dlc \
+#       --dlc-superanimal superanimal_topviewmouse --mice-count 4 --px-to-mm <校正値>
+# ⚠️ TopViewMouse は paw キーポイントを持たない（hip で近似）。ひっかき判定の
+#    解剖学的厳密性が要る場合は paw を含むカスタム学習モデルの利用を検討すること。

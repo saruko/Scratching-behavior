@@ -148,11 +148,23 @@ function generateDemoData() {
                 // Rotate
                 const ax = raw.rx * cosA - raw.ry * sinA;
                 const ay = raw.rx * sinA + raw.ry * cosA;
+                // B-2 デモ用の信頼度: 実際の姿勢推定を模し、後肢（オクルージョンしやすい）は
+                // やや低め・体幹/頭部は高めの代表値を割り当て、信頼度カラー表示（高/中/低）が
+                // デモモードでも視覚的に確認できるようにする。フレームごとに乱数を使うと
+                // リングが点滅するため、キーポイント種別ごとの固定代表値とする。
+                let demoConf = 0.93;
+                if (kpName.includes("hind_paw")) {
+                    demoConf = kpName.includes("left") ? 0.62 : 0.46; // 中 / 低 を再現
+                } else if (kpName.includes("fore_paw")) {
+                    demoConf = 0.78;
+                } else if (kpName === "nose") {
+                    demoConf = 0.71;
+                }
                 // Translate
                 kps[kpName] = {
                     x: Math.round(cX + ax),
                     y: Math.round(cY + ay),
-                    conf: 0.95
+                    conf: demoConf
                 };
             }
 

@@ -71,18 +71,27 @@ def compute_distance(p1_x, p1_y, p2_x, p2_y):
     return float(np.sqrt((p1_x - p2_x) ** 2 + (p1_y - p2_y) ** 2))
 
 
-def _count_oscillations(history: list, min_amplitude_px: float) -> int:
+def _count_oscillations(history, min_amplitude_px: float) -> int:
     """
     [5] 座標履歴から方向転換回数を計算する。
     min_amplitude_px 未満の微小変位（姿勢推定ノイズ）は無視する。
+
+    NOTE: 位置インデックス (history[i]) を使わず逐次走査するため、list / deque
+    いずれを渡しても O(N)。deque への添字アクセスは O(N) であり、添字ループだと
+    全体が O(N^2) になるのを避ける意図。
     """
     count = 0
     last_d = 0.0
-    for i in range(1, len(history)):
-        prev_val, curr_val = history[i - 1], history[i]
+    prev_val = None
+    for curr_val in history:
+        if prev_val is None:
+            prev_val = curr_val
+            continue
         if np.isnan(prev_val) or np.isnan(curr_val):
+            prev_val = curr_val
             continue
         d = curr_val - prev_val
+        prev_val = curr_val
         if abs(d) < min_amplitude_px:
             continue  # ジッター無視 — last_d も更新しない
         if last_d != 0 and ((d > 0 and last_d < 0) or (d < 0 and last_d > 0)):
@@ -205,7 +214,9 @@ def compute_summary_stats(bouts_df: pd.DataFrame,
 
     mice = []
     if "mouse_id" in pose_df.columns:
-        mice = sorted(pose_df["mouse_id"].dropna().unique())
+        # mouse_id=0 は「誤検出（除外）」の特別値。サマリ集計から完全に除外する
+        # （解析対象の判定 valid_mice_df の mouse_id > 0 フィルタと一貫させる）。
+        mice = sorted(m for m in pose_df["mouse_id"].dropna().unique() if m > 0)
 
     records = []
     for m_id in mice:
@@ -317,8 +328,10 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
         feats = {col: [] for col in feature_cols}
         prev_x_L, prev_y_L, prev_f_L = None, None, None
         prev_x_R, prev_y_R, prev_f_R = None, None, None
-        x_hist_L, y_hist_L = [], []
-        x_hist_R, y_hist_R = [], []
+        x_hist_L = deque(maxlen=SCRATCH_WINDOW_FRAMES)
+        y_hist_L = deque(maxlen=SCRATCH_WINDOW_FRAMES)
+        x_hist_R = deque(maxlen=SCRATCH_WINDOW_FRAMES)
+        y_hist_R = deque(maxlen=SCRATCH_WINDOW_FRAMES)
         vel_L_buf = deque(maxlen=SCRATCH_VELOCITY_SMOOTH_FRAMES)  # [4]
         vel_R_buf = deque(maxlen=SCRATCH_VELOCITY_SMOOTH_FRAMES)  # [4]
         # テレポート検出用: 前フレームの重心座標 (neck と spine_mid の中点)
@@ -414,10 +427,9 @@ def extract_features_and_bouts(pose_df: pd.DataFrame,
             # 拡大率が異なる実験間でも、生物学的に等価な振幅閾値が適用される。
             _min_amp_px = SCRATCH_MIN_OSC_AMPLITUDE_MM / pixel_to_mm_ratio if pixel_to_mm_ratio > 0 else 3.0
 
+            # deque(maxlen=SCRATCH_WINDOW_FRAMES) なので古い要素は自動破棄される
             x_hist_L.append(hind_l_x);  y_hist_L.append(hind_l_y)
             x_hist_R.append(hind_r_x);  y_hist_R.append(hind_r_y)
-            if len(x_hist_L) > SCRATCH_WINDOW_FRAMES: x_hist_L.pop(0); y_hist_L.pop(0)
-            if len(x_hist_R) > SCRATCH_WINDOW_FRAMES: x_hist_R.pop(0); y_hist_R.pop(0)
 
             osc_x_L = _count_oscillations(x_hist_L, _min_amp_px)
             osc_y_L = _count_oscillations(y_hist_L, _min_amp_px)

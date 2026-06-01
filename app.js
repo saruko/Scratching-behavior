@@ -35,6 +35,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // 手動補正が行われたフレームのインデックスを記録し、タイムライン上にインジケータを描画する
         editedFrames: new Set(),
 
+        // ── B-3 Bout レビュー状態 ────────────────────────────────────────────
+        // index: 現在レビュー中の Bout（時系列ソート後の配列インデックス, -1=未開始）
+        // accepted: 承認済み Bout のキー集合。キーは `${mouse_id}:${bout_start_frame}`
+        //   （フレーム番号は絶対値で安定するため、他 Bout の編集後も承認状態を保持できる）
+        boutReview: { index: -1, accepted: new Set() },
+
         // ── 動画エクスポート ────────────────────────────────────────────────
         mediaRecorder: null,
         recordedChunks: [],
@@ -66,6 +72,18 @@ document.addEventListener('DOMContentLoaded', () => {
             detectedTracks: [],
         },
         confirmedMapping: {},
+
+        // ── Layer 1: ケージマスク状態 ───────────────────────────────────────
+        // maskActive: 編集モード中フラグ
+        // maskPolygons: 確定済み多角形のリスト（各要素は [[x,y], [x,y], ...] 動画ピクセル座標）
+        // maskInProgress: 編集中（未確定）の多角形の頂点リスト
+        // maskVideoName: 現在マスク編集対象の動画名（保存時に使用）
+        cageMask: {
+            active: false,
+            polygons: [],         // 確定済み多角形 (動画ピクセル座標)
+            inProgress: [],       // 編集中の頂点列
+            videoName: null,
+        },
     };
     // visualizer.js から参照させるためグローバル公開
     window.appState = appState;
@@ -133,6 +151,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const timeCurrent = document.getElementById('time-current');
     const timeTotal = document.getElementById('time-total');
     const scrubSlider = document.getElementById('scrub-slider');
+    // 動画直下のシークバー（再生コントロールバー内）。scrubSlider と双方向同期する。
+    const playbackSeekSlider = document.getElementById('playback-seek-slider');
     const speedSelect = document.getElementById('speed-select');
     
     // File inputs
@@ -162,7 +182,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const swapStartFrame = document.getElementById('swap-start-frame');
     const btnSwapIds = document.getElementById('btn-swap-ids');
     const btnExportCsv = document.getElementById('btn-export-csv');
-    
+    const btnExportPublication = document.getElementById('btn-export-publication');
+
     // FastAPI Pipeline integration widgets (NEW)
     const btnRunPipeline = document.getElementById('btn-run-pipeline');
     const pipelineEngine = document.getElementById('pipeline-engine');
@@ -281,6 +302,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Sync timeline slider
         scrubSlider.value = appState.currentFrame;
+        // 動画直下シークバーも同期（範囲・現在値とも scrubSlider に合わせる）
+        if (playbackSeekSlider) {
+            playbackSeekSlider.max = scrubSlider.max;
+            playbackSeekSlider.value = appState.currentFrame;
+        }
 
         // Sync numeric frame inputs
         swapStartFrame.value = appState.currentFrame;
@@ -661,6 +687,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const temp = frame.mice[mouseA];
                 frame.mice[mouseA] = frame.mice[mouseB];
                 frame.mice[mouseB] = temp;
+                // [A-5] スワップで変更された全フレーム×両個体を補正済みとして記録
+                markFrameMouseCorrected(f, mouseA);
+                markFrameMouseCorrected(f, mouseB);
             }
         }
 
@@ -689,7 +718,9 @@ document.addEventListener('DOMContentLoaded', () => {
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
+            appState.exported = true;  // [B-1] 出力ステップ完了
+            updateStepGuide();
             alert("✓ 補正後データのCSV出力を完了しました！");
         } catch (e) {
             console.error(e);
@@ -697,10 +728,49 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // --- 8b. [B-5] 出版用エクスポート Handler ---
+    if (btnExportPublication) {
+        btnExportPublication.addEventListener('click', () => {
+            if (!appState.data) {
+                alert("⚠️ 解析データが読み込まれていません。");
+                return;
+            }
+            try {
+                const timestamp = new Date().toISOString().slice(0, 10);
+
+                // ① 個体別統計 CSV
+                triggerBlobDownload(
+                    new Blob([exportPerMouseStatsCSV()], { type: 'text/csv;charset=utf-8;' }),
+                    `scratch_summary_stats_${timestamp}.csv`
+                );
+
+                // ② 来歴 manifest JSON
+                triggerBlobDownload(
+                    new Blob([JSON.stringify(buildPublicationManifest(), null, 2)], { type: 'application/json;charset=utf-8;' }),
+                    `publication_manifest_${timestamp}.json`
+                );
+
+                // ③ グラフ図 PNG（Bout数 / 累積時間）
+                let figCount = 0;
+                if (exportChartFigurePng(charts.boutCountChart, `fig_bout_counts_${timestamp}.png`)) figCount++;
+                if (exportChartFigurePng(charts.boutDurationChart, `fig_bout_durations_${timestamp}.png`)) figCount++;
+
+                appState.exported = true;  // [B-1] 出力ステップ完了
+                updateStepGuide();
+                alert(`✓ 出版用エクスポートを完了しました！\n・個体別統計 CSV\n・来歴 manifest JSON\n・グラフ図 PNG ${figCount} 枚`);
+            } catch (e) {
+                console.error(e);
+                alert("⚠️ 出版用エクスポートに失敗しました。");
+            }
+        });
+    }
+
     function exportCorrectedCSV() {
         // バックエンドの *_frame_labels.csv 出力スキーマと一致させる
         // （evaluate.py に直接流せる形式 + 学術論文用の mm 物理単位特徴量を含む）
-        const headers = ["frame_idx", "track", "mouse_id", "is_scratch", "scratch_flag", "scratch_prob"];
+        // [A-5] is_manually_corrected: この行（フレーム×個体）が手動補正されたか (1/0)。
+        // 自動パイプライン出力（プレビュー）と研究者確定値を区別する来歴フラグ。
+        const headers = ["frame_idx", "track", "mouse_id", "is_scratch", "scratch_flag", "scratch_prob", "is_manually_corrected"];
 
         // Add keypoint columns (x, y) — conf は手動補正後は 1.0 とみなす
         KEYPOINTS_LIST.forEach(kp => {
@@ -750,7 +820,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     mId,
                     flag,                          // is_scratch (evaluate.py 互換)
                     flag,                          // scratch_flag (パイプライン互換)
-                    fmt(mData.scratch_prob, 3)
+                    fmt(mData.scratch_prob, 3),
+                    mData._corrected ? 1 : 0       // [A-5] is_manually_corrected
                 ];
 
                 // Coordinates
@@ -771,6 +842,192 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         return rows.join("\n");
+    }
+
+    // ===================================================================
+    // [B-5] 出版用エクスポート（個体別統計 + 来歴 manifest + グラフ図）
+    // -------------------------------------------------------------------
+    // 補正後 CSV（フレーム×個体の生データ）とは別に、論文の Results/Methods に
+    // そのまま転記できる「集計済み」成果物を一括で書き出す。
+    //   ① 個体別ひっかき統計 CSV（Bout数・総時間・平均/中央値/範囲・頻度・%時間）
+    //   ② 来歴 manifest JSON（閾値・校正値・補正状況・承認 Bout 数・日時）
+    //   ③ グラフ図 PNG（Bout数棒グラフ・累積時間ドーナツ）
+    // ===================================================================
+
+    /**
+     * 数値配列の中央値を返す。空配列は null。
+     * @param {number[]} arr
+     * @returns {number|null}
+     */
+    /**
+     * キーポイント辞書 {kp: {x,y,conf}} の高速ディープコピー。
+     * 欠損フレーム補完ループで数十万回呼ばれるため、低速な
+     * JSON.parse(JSON.stringify()) を避けて手動コピーする（ブラウザの応答停止を防止）。
+     * x/y/conf のみを持つ既知構造なので、これで完全に独立したオブジェクトになる
+     * （後段の手動ドラッグ補正がフレーム間で干渉しない）。
+     */
+    function _cloneKeypoints(kps) {
+        const out = {};
+        for (const k in kps) {
+            const p = kps[k];
+            out[k] = { x: p.x, y: p.y, conf: p.conf };
+        }
+        return out;
+    }
+
+    function _median(arr) {
+        if (!arr || arr.length === 0) return null;
+        const s = [...arr].sort((a, b) => a - b);
+        const mid = Math.floor(s.length / 2);
+        return s.length % 2 !== 0 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+    }
+
+    /**
+     * 個体別のひっかき行動統計を集計する。
+     * Akiyama 2010 等の標準的な scratch 指標（bout 数・総時間・頻度）に準拠。
+     * 記録時間は numFrames / fps（秒）で算出する。
+     * @returns {Array<Object>} 個体ごとの統計オブジェクト配列
+     */
+    function computePerMouseStats() {
+        const fps = (appState.data && appState.data.fps) || SCRATCH_THRESHOLDS.fps || 30;
+        const numFrames = (appState.data && appState.data.numFrames) || 0;
+        const recordingSec = fps > 0 ? numFrames / fps : 0;
+        const recordingMin = recordingSec / 60;
+        const bouts = (appState.data && appState.data.bouts) || [];
+        const accepted = appState.boutReview ? appState.boutReview.accepted : new Set();
+
+        return appState.miceIds.map(mId => {
+            const mBouts = bouts.filter(b => b.mouse_id === mId);
+            const durations = mBouts.map(b => b.bout_duration_s);
+            const totalDur = durations.reduce((a, b) => a + b, 0);
+            const totalFrames = mBouts.reduce((a, b) => a + (b.bout_n_frames || 0), 0);
+            const nAccepted = mBouts.filter(b => accepted && accepted.has(boutKey(b))).length;
+
+            return {
+                mouse_id: mId,
+                n_bouts: mBouts.length,
+                n_accepted_bouts: nAccepted,
+                total_scratch_duration_s: totalDur,
+                total_scratch_frames: totalFrames,
+                mean_bout_duration_s: mBouts.length ? totalDur / mBouts.length : 0,
+                median_bout_duration_s: _median(durations) || 0,
+                min_bout_duration_s: durations.length ? Math.min(...durations) : 0,
+                max_bout_duration_s: durations.length ? Math.max(...durations) : 0,
+                // 頻度: 1分あたりの bout 数（標準的な scratch 指標）
+                bouts_per_min: recordingMin > 0 ? mBouts.length / recordingMin : 0,
+                // ひっかきに費やした時間の割合（記録全体に対する %）
+                pct_time_scratching: recordingSec > 0 ? (totalDur / recordingSec) * 100 : 0
+            };
+        });
+    }
+
+    /**
+     * 個体別統計を CSV 文字列に整形する（mm 系特徴量同様に時間は小数 3 桁）。
+     * @returns {string}
+     */
+    function exportPerMouseStatsCSV() {
+        const headers = [
+            "mouse_id", "n_bouts", "n_accepted_bouts",
+            "total_scratch_duration_s", "total_scratch_frames",
+            "mean_bout_duration_s", "median_bout_duration_s",
+            "min_bout_duration_s", "max_bout_duration_s",
+            "bouts_per_min", "pct_time_scratching"
+        ];
+        const rows = [headers.join(",")];
+        const f3 = v => Number(v).toFixed(3);
+
+        computePerMouseStats().forEach(s => {
+            rows.push([
+                s.mouse_id, s.n_bouts, s.n_accepted_bouts,
+                f3(s.total_scratch_duration_s), s.total_scratch_frames,
+                f3(s.mean_bout_duration_s), f3(s.median_bout_duration_s),
+                f3(s.min_bout_duration_s), f3(s.max_bout_duration_s),
+                f3(s.bouts_per_min), f3(s.pct_time_scratching)
+            ].join(","));
+        });
+        return rows.join("\n");
+    }
+
+    /**
+     * GUI 現在状態の来歴 manifest を構築する。
+     * pipeline.py の write_provenance_manifest と同じ思想で、補正後の成果物が
+     * 「どの閾値・校正値・補正状況で確定したか」を 1 ファイルに残す。
+     * （バックエンド manifest はパイプライン実行時、こちらは手動補正確定時の来歴）
+     * @returns {Object}
+     */
+    function buildPublicationManifest() {
+        const fps = (appState.data && appState.data.fps) || SCRATCH_THRESHOLDS.fps || 30;
+        const numFrames = (appState.data && appState.data.numFrames) || 0;
+        const isDefaultCalib = Math.abs(SCRATCH_THRESHOLDS.pixelToMmRatio - 0.25) < 1e-9;
+
+        return {
+            schema: "mouse-scratch-publication/v1",
+            generated_at: new Date().toISOString(),
+            source: appState.hasRealData ? "csv_or_pipeline" : "demo_data",
+            recording: {
+                num_frames: numFrames,
+                fps: fps,
+                duration_s: fps > 0 ? numFrames / fps : 0,
+                mice_ids: [...appState.miceIds],
+                mice_count: appState.miceIds.length
+            },
+            calibration: {
+                pixel_to_mm_ratio: SCRATCH_THRESHOLDS.pixelToMmRatio,
+                pixel_to_mm_is_default: isDefaultCalib
+            },
+            scratch_thresholds: {
+                SCRATCH_MIN_VELOCITY_MM_S:     SCRATCH_THRESHOLDS.minVelocityMmS,
+                SCRATCH_MAX_HEAD_DIST_MM:      SCRATCH_THRESHOLDS.maxHeadDistMm,
+                SCRATCH_MIN_OSCILLATIONS:      SCRATCH_THRESHOLDS.minOscillations,
+                SCRATCH_MIN_OSC_AMPLITUDE_MM:  SCRATCH_THRESHOLDS.minOscAmplitudeMm,
+                SCRATCH_VELOCITY_SMOOTH_FRAMES: SCRATCH_THRESHOLDS.velocitySmoothFrames,
+                SCRATCH_WINDOW_FRAMES:         SCRATCH_THRESHOLDS.windowFrames,
+                BOUT_MIN_FRAMES:               SCRATCH_THRESHOLDS.boutMinFrames,
+                BOUT_MERGE_GAP:                SCRATCH_THRESHOLDS.boutMergeGap,
+                INTERPOLATION_MAX_GAP:         SCRATCH_THRESHOLDS.interpolationMaxGap
+            },
+            // [A-5] 手動補正の来歴: 補正済みフレーム数と承認 Bout 数を記録
+            manual_correction: {
+                edited_frame_count: appState.editedFrames ? appState.editedFrames.size : 0,
+                accepted_bout_count: appState.boutReview ? appState.boutReview.accepted.size : 0,
+                total_bout_count: (appState.data && appState.data.bouts) ? appState.data.bouts.length : 0
+            },
+            per_mouse_statistics: computePerMouseStats()
+        };
+    }
+
+    /**
+     * Blob をダウンロードさせる共通ヘルパー。
+     * @param {Blob} blob
+     * @param {string} filename
+     */
+    function triggerBlobDownload(blob, filename) {
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.setAttribute("download", filename);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+    }
+
+    /**
+     * Chart.js インスタンスの図を PNG として書き出す。
+     * @param {Object} chart - Chart.js インスタンス
+     * @param {string} filename
+     * @returns {boolean} 書き出せたか
+     */
+    function exportChartFigurePng(chart, filename) {
+        if (!chart || typeof chart.toBase64Image !== "function") return false;
+        const dataUrl = chart.toBase64Image("image/png", 1.0);
+        if (!dataUrl || dataUrl.length < 32) return false;
+        // dataURL → Blob 変換
+        const byteStr = atob(dataUrl.split(",")[1]);
+        const len = byteStr.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = byteStr.charCodeAt(i);
+        triggerBlobDownload(new Blob([bytes], { type: "image/png" }), filename);
+        return true;
     }
 
     // --- 9. Video Drop & Load Binding ---
@@ -917,6 +1174,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // 動画の実解像度を記録（キーポイント座標の canvas 座標変換に使用）
             appState.videoW = bgVideo.videoWidth;
             appState.videoH = bgVideo.videoHeight;
+            if (typeof updateStepGuide === 'function') updateStepGuide();  // [B-1]
 
             // CSVデータがロード済みであれば canvas を動画の描画領域にフィット
             if (appState.hasRealData) {
@@ -1012,6 +1270,25 @@ document.addEventListener('DOMContentLoaded', () => {
         updateUIForFrame();
     });
 
+    // 動画直下シークバー：scrubSlider と同一の挙動（再生位置の即時移動）
+    if (playbackSeekSlider) {
+        playbackSeekSlider.addEventListener('input', (e) => {
+            if (appState.isPlaying) togglePlay();
+            appState.currentFrame = parseInt(e.target.value);
+            updateUIForFrame();
+        });
+    }
+
+    // B-2: キーポイント信頼度カラー表示トグル。
+    // visualizer.showConfidence を切り替え、停止中でも即座に再描画する。
+    const toggleConfidence = document.getElementById('toggle-confidence');
+    if (toggleConfidence) {
+        toggleConfidence.addEventListener('change', (e) => {
+            visualizer.showConfidence = e.target.checked;
+            updateUIForFrame();
+        });
+    }
+
     speedSelect.addEventListener('change', (e) => {
         appState.playbackSpeed = parseFloat(e.target.value);
         if (bgVideo && bgVideo.src) {
@@ -1068,41 +1345,173 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // B-3: Bout を時系列（開始フレーム→個体ID）で安定ソートする。
+    // 配列インデックスがレビュー順と一致するため、ナビゲーションが直感的になる。
+    function sortBouts() {
+        appState.data.bouts.sort((a, b) =>
+            (a.bout_start_frame - b.bout_start_frame) || (a.mouse_id - b.mouse_id));
+    }
+
+    // B-3: 承認状態キー（個体ID:開始フレーム）。フレーム番号は絶対値で安定。
+    function boutKey(b) { return `${b.mouse_id}:${b.bout_start_frame}`; }
+
     function renderBoutsList() {
         panelBoutsList.innerHTML = '';
         if (appState.data.bouts.length === 0) {
             panelBoutsList.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem; text-align:center; padding: 20px 0;">検出されたひっかき行動はありません。</div>';
+            updateBoutReviewBar();
             return;
         }
 
-        appState.data.bouts.forEach(b => {
+        sortBouts();
+        appState.data.bouts.forEach((b, idx) => {
             const item = document.createElement('div');
             item.className = 'bout-item';
+            item.dataset.boutIndex = idx;
+            // B-3: 現在レビュー中の Bout 行をハイライト
+            if (idx === appState.boutReview.index) item.classList.add('bout-reviewing');
 
             // 動的カラーパレット対応: 未定義IDはフォールバック
             const colorEntry = visualizer.mouseColors[b.mouse_id] || { name: `M${b.mouse_id}`, hex: "#AAAAAA" };
             const mouseName = colorEntry.name;
             const mouseHex = colorEntry.hex;
 
+            // B-3: 承認済みバッジ
+            const accepted = appState.boutReview.accepted.has(boutKey(b));
+            const badge = accepted ? '<span class="bout-status-badge accepted">✓ 承認済</span>' : '';
+
             item.innerHTML = `
                 <div class="bout-meta">
                     <span class="mouse-color-dot" style="color: ${mouseHex}; background-color: currentColor;"></span>
                     <div>
-                        <div class="bout-title">Mouse ${b.mouse_id} (${mouseName}) - Bout #${b.bout_id}</div>
+                        <div class="bout-title">Mouse ${b.mouse_id} (${mouseName}) - Bout #${b.bout_id}${badge}</div>
                         <div class="bout-duration">${b.bout_n_frames}f (開始: ${b.bout_start_frame}f)</div>
                     </div>
                 </div>
                 <div class="bout-duration">${b.bout_duration_s.toFixed(2)}s</div>
             `;
 
-            item.addEventListener('click', () => {
-                appState.currentFrame = b.bout_start_frame;
-                if (!appState.isPlaying) togglePlay();
-                updateUIForFrame();
-            });
+            item.addEventListener('click', () => gotoBout(idx));
 
             panelBoutsList.appendChild(item);
         });
+        updateBoutReviewBar();
+    }
+
+    // ── B-3 Bout レビュー: ナビゲーション & 採否 ─────────────────────────────
+    // 指定インデックスの Bout へジャンプし、再生ヘッドを開始フレームに移動、
+    // 該当個体を選択状態にして、レビュー対象としてハイライトする。
+    function gotoBout(idx) {
+        const bouts = appState.data.bouts;
+        if (idx < 0 || idx >= bouts.length) return;
+        appState.boutReview.index = idx;
+        const b = bouts[idx];
+        appState.currentFrame = b.bout_start_frame;
+        setSelectedMouse(b.mouse_id);
+        if (appState.isPlaying) togglePlay(); // レビュー中は停止して観察しやすく
+        updateUIForFrame();
+        // レビュー対象行のハイライト更新 & スクロール
+        panelBoutsList.querySelectorAll('.bout-item').forEach(el => {
+            el.classList.toggle('bout-reviewing', parseInt(el.dataset.boutIndex) === idx);
+        });
+        const activeRow = panelBoutsList.querySelector(`.bout-item[data-bout-index="${idx}"]`);
+        if (activeRow) activeRow.scrollIntoView({ block: 'nearest' });
+        updateBoutReviewBar();
+    }
+
+    function gotoNextBout() {
+        const n = appState.data.bouts.length;
+        if (n === 0) return;
+        const cur = appState.boutReview.index;
+        gotoBout(cur < 0 ? 0 : Math.min(cur + 1, n - 1));
+    }
+
+    function gotoPrevBout() {
+        const n = appState.data.bouts.length;
+        if (n === 0) return;
+        const cur = appState.boutReview.index;
+        gotoBout(cur < 0 ? 0 : Math.max(cur - 1, 0));
+    }
+
+    // 現在の Bout を承認（真陽性確定）。データは変更せず、承認集合に記録する。
+    function acceptCurrentBout() {
+        const idx = appState.boutReview.index;
+        const b = appState.data.bouts[idx];
+        if (!b) return;
+        appState.boutReview.accepted.add(boutKey(b));
+        renderBoutsList();
+        // 次の未承認 Bout へ自動で進む（連続レビュー効率化）
+        gotoNextBout();
+    }
+
+    // 現在の Bout を却下＝誤検出として除去。区間の scratch_flag を 0 にして再生成する。
+    // これは手動補正として扱い、editedFrames とエクスポートの is_manually_corrected に反映する。
+    function rejectCurrentBout() {
+        const idx = appState.boutReview.index;
+        const b = appState.data.bouts[idx];
+        if (!b) return;
+        const mId = b.mouse_id;
+        // 区間の各フレームについて、変更前の状態を Undo スタックに退避してから
+        // scratch_flag を 0 に倒す。pushUndoSnapshot 内で markFrameMouseCorrected も
+        // 呼ばれるため、is_manually_corrected フラグも各フレームに付与される。
+        for (let f = b.bout_start_frame; f <= b.bout_end_frame; f++) {
+            const fr = appState.data.frames[f];
+            if (fr && fr.mice[mId]) {
+                pushUndoSnapshot(f, mId);
+                fr.mice[mId].scratch_flag = 0;
+            }
+        }
+        appState.boutReview.accepted.delete(boutKey(b));
+        // Bout 再生成（却下した区間は消える）。インデックスは範囲内にクランプ。
+        autoGenerateBoutsFromFlags();
+        renderTimelineBouts();
+        renderBoutsList();
+        charts.updateAnalytics(appState.data.bouts);
+        const n = appState.data.bouts.length;
+        appState.boutReview.index = n === 0 ? -1 : Math.min(idx, n - 1);
+        if (appState.boutReview.index >= 0) gotoBout(appState.boutReview.index);
+        else updateBoutReviewBar();
+    }
+
+    // レビュー ツールバーの表示更新（現在 Bout ラベル・進捗・ボタン活性）
+    function updateBoutReviewBar() {
+        const bar = document.getElementById('bout-review-bar');
+        if (!bar) return;
+        const curLbl = document.getElementById('bout-review-current');
+        const progLbl = document.getElementById('bout-review-progress');
+        const btnPrev = document.getElementById('btn-bout-prev');
+        const btnNext = document.getElementById('btn-bout-next');
+        const btnAcc = document.getElementById('btn-bout-accept');
+        const btnRej = document.getElementById('btn-bout-reject');
+        const bouts = appState.data.bouts;
+        const n = bouts.length;
+        const idx = appState.boutReview.index;
+        const hasCurrent = idx >= 0 && idx < n;
+
+        if (n === 0) {
+            curLbl.textContent = 'Bout なし';
+        } else if (!hasCurrent) {
+            curLbl.textContent = `レビュー未開始 (全 ${n} 件)`;
+        } else {
+            const b = bouts[idx];
+            const nm = (visualizer.mouseColors[b.mouse_id] || { name: `M${b.mouse_id}` }).name;
+            curLbl.textContent = `${idx + 1} / ${n}: Mouse ${b.mouse_id}(${nm}) #${b.bout_id}`;
+        }
+        if (progLbl) {
+            progLbl.textContent = n > 0 ? `承認 ${appState.boutReview.accepted.size} / ${n}` : '';
+        }
+        if (btnPrev) btnPrev.disabled = n === 0 || idx <= 0;
+        if (btnNext) btnNext.disabled = n === 0 || idx >= n - 1;
+        if (btnAcc) btnAcc.disabled = !hasCurrent;
+        if (btnRej) btnRej.disabled = !hasCurrent;
+    }
+
+    // 個体選択状態を設定し、セレクターボタンの活性表示も同期する。
+    function setSelectedMouse(mId) {
+        appState.selectedMouse = mId;
+        document.querySelectorAll('.mouse-btn').forEach(b => b.classList.remove('active'));
+        const activeBtn = document.getElementById(`mouse-btn-${mId}`);
+        if (activeBtn) activeBtn.classList.add('active');
     }
 
     // --- 12. CSV Loaders ---
@@ -1164,7 +1573,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const parsedFrames = parseFrameCsv(text);
                 if (parsedFrames.length === 0) throw new Error("Parsed zero records");
 
-                const maxFrameIdx = Math.max(...parsedFrames.map(r => r.frame_idx));
+                // 大規模データ対策: Math.max(...array) は巨大配列でスプレッド展開すると
+                // 引数数が上限を超え "Maximum call stack size exceeded" で落ちるため、
+                // ループで最大フレーム番号を求める（数十万行でも安全）。
+                let maxFrameIdx = 0;
+                for (const r of parsedFrames) { if (r.frame_idx > maxFrameIdx) maxFrameIdx = r.frame_idx; }
                 const totalFrames = maxFrameIdx + 1;
 
                 const framesArray = [];
@@ -1207,7 +1620,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (f > 0 && framesArray[f-1].mice[mId]) {
                                 const prev = framesArray[f-1].mice[mId];
                                 frame.mice[mId] = {
-                                    keypoints: JSON.parse(JSON.stringify(prev.keypoints)),
+                                    keypoints: _cloneKeypoints(prev.keypoints),
                                     scratch_flag: 0,
                                     scratch_prob: 0,
                                     features: { ...prev.features },
@@ -1351,7 +1764,10 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.undoStack = [];
         appState.redoStack = [];
         appState.editedFrames = new Set();
+        // [B-3] Bout レビュー状態を新規ロードごとに初期化
+        appState.boutReview = { index: -1, accepted: new Set() };
         updateUndoRedoButtons();
+        updateCorrectionStatus();  // [A-5] 新規ロード時はプレビュー状態に戻す
 
         // 実CSVデータがロードされたことを記録し、canvas を動画描画領域に合わせてリサイズ
         appState.hasRealData = true;
@@ -1452,6 +1868,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const flagIdx = headers.indexOf('scratch_flag');
         const probIdx = headers.indexOf('scratch_prob');
         const isMockIdx = headers.indexOf('is_mock');
+        const idConfIdx = headers.indexOf('id_confidence');  // [A-3] カラーID信頼度
 
         if (fIdx === -1) {
             throw new Error("Missing 'frame_idx'");
@@ -1477,6 +1894,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const scratchFlag = flagIdx !== -1 ? parseInt(cols[flagIdx]) : 0;
             const scratchProb = probIdx !== -1 ? parseFloat(cols[probIdx]) : 0.0;
+            // [A-3] カラーID信頼度（採用色得票率）。列が無い旧CSVでは null。
+            let idConfidence = null;
+            if (idConfIdx !== -1) {
+                const c = parseFloat(cols[idConfIdx]);
+                idConfidence = isNaN(c) ? null : c;
+            }
 
             const keypoints = {};
             KEYPOINTS_LIST.forEach(kp => {
@@ -1486,10 +1909,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 const yColIdx = headers.indexOf(yColName);
 
                 if (xColIdx !== -1 && yColIdx !== -1) {
+                    // [B-2] キーポイント信頼度をCSVから取得する。
+                    // 姿勢推定エンジン（SLEAP/YOLO）が出力した {kp}_conf 列が存在すればその値を、
+                    // 列が無い・取得不能（-1.0 等の負値）の場合は null とし、
+                    // 「信頼度データなし」として骨格カラー表示では中立色にフォールバックする。
+                    const confColIdx = headers.indexOf(`${kp}_conf`);
+                    let kpConf = null;
+                    if (confColIdx !== -1) {
+                        const cv = parseFloat(cols[confColIdx]);
+                        kpConf = (isNaN(cv) || cv < 0) ? null : cv;
+                    }
                     keypoints[kp] = {
                         x: Math.round(parseFloat(cols[xColIdx])),
                         y: Math.round(parseFloat(cols[yColIdx])),
-                        conf: 0.95
+                        conf: kpConf
                     };
                 }
             });
@@ -1535,6 +1968,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 mouse_id: mouseId,
                 scratch_flag: scratchFlag,
                 scratch_prob: scratchProb,
+                id_confidence: idConfidence,
                 is_mock: isMockVal,
                 keypoints,
                 features
@@ -1655,6 +2089,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     kps[kpName].x = Math.round(kps[kpName].x + dx);
                     kps[kpName].y = Math.round(kps[kpName].y + dy);
                 }
+                // [A-5] バルクオフセットで変更された全フレームを補正済みとして記録
+                markFrameMouseCorrected(f, mouseId);
                 modifiedCount++;
             }
 
@@ -2034,7 +2470,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const parsedFrames = parseFrameCsv(frameText);
             if (parsedFrames.length === 0) throw new Error("Parsed zero records");
 
-            const maxFrameIdx = Math.max(...parsedFrames.map(r => r.frame_idx));
+            // 大規模データ対策: Math.max(...array) は巨大配列でスプレッド展開すると
+            // 引数数が上限を超え "Maximum call stack size exceeded" で落ちるため、
+            // ループで最大フレーム番号を求める（数十万行でも安全）。
+            let maxFrameIdx = 0;
+            for (const r of parsedFrames) { if (r.frame_idx > maxFrameIdx) maxFrameIdx = r.frame_idx; }
             const totalFrames = maxFrameIdx + 1;
 
             const framesArray = [];
@@ -2073,7 +2513,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (!frame.mice[mId] && f > 0 && framesArray[f-1].mice[mId]) {
                         const prev = framesArray[f-1].mice[mId];
                         frame.mice[mId] = {
-                            keypoints: JSON.parse(JSON.stringify(prev.keypoints)),
+                            keypoints: _cloneKeypoints(prev.keypoints),
                             scratch_flag: 0,
                             scratch_prob: 0,
                             features: { ...prev.features },
@@ -2148,20 +2588,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function enterConfirmationMode(previewData) {
         // 検出されたトラック ID 一覧を抽出（出現順を保持）
+        // 併せて各トラックの出現フレーム範囲（first/last）を記録し、
+        // 確認リストに「動画の何分に出現するか」を表示できるようにする。
         const trackOrder = [];
         const trackSuggestedIds = {};
+        const trackFrameRange = {};  // { track: { first: frameIdx, last: frameIdx } }
         for (const frameKey of Object.keys(previewData.frames || {})) {
+            const f = parseInt(frameKey);
             const dets = previewData.frames[frameKey].detections || [];
             for (const det of dets) {
                 if (!trackOrder.includes(det.track)) {
                     trackOrder.push(det.track);
                     if (det.mouse_id != null) trackSuggestedIds[det.track] = det.mouse_id;
                 }
+                // Object.keys の順序に依存せず Math.min/max で範囲を更新
+                if (!isNaN(f)) {
+                    const r = trackFrameRange[det.track] || { first: f, last: f };
+                    r.first = Math.min(r.first, f);
+                    r.last = Math.max(r.last, f);
+                    trackFrameRange[det.track] = r;
+                }
             }
         }
         appState.previewMode.detectedTracks = trackOrder;
+        appState.previewMode.trackFrameRange = trackFrameRange;
+        appState.previewMode.suggestedIds = trackSuggestedIds;  // 「自動候補を全採用」用に保持
         appState.previewMode.step = 'bbox';
         appState.previewMode.active = true;
+        // 割り当てリストの絞り込み状態
+        appState.previewMode.filter = { text: '', unassignedOnly: false };
+        // サムネイル生成済みキャッシュ（track → dataURL）。重複生成を避ける。
+        appState.previewMode.thumbCache = appState.previewMode.thumbCache || {};
 
         // 自動推定されたカラーIDをデフォルトとして適用
         appState.confirmedMapping = { ...trackSuggestedIds };
@@ -2195,6 +2652,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const panel = document.getElementById('confirmation-panel');
         panel.style.display = 'flex';
         updateConfirmationStepLabel();
+        initConfirmationToolbar();
         rebuildConfirmationMappingList();
         updateConfirmationProgress();
         updateConfirmationNextButton();
@@ -2209,6 +2667,104 @@ document.addEventListener('DOMContentLoaded', () => {
         btnRunPipeline.textContent = "確認モード中...";
     }
 
+    /**
+     * 確認モードのツールバー（検索・未割当フィルタ・一括割当・自動候補採用・全クリア）を
+     * 初期化する。enterConfirmationMode から一度だけ呼ばれる。
+     */
+    function initConfirmationToolbar() {
+        const palette = (typeof MOUSE_COLOR_PALETTE !== 'undefined') ? MOUSE_COLOR_PALETTE : {};
+        const maxMice = (typeof MAX_MICE_LIMIT !== 'undefined') ? MAX_MICE_LIMIT : 8;
+
+        // 一括割当の個体IDセレクトを生成
+        const bulkSel = document.getElementById('confirmation-bulk-id');
+        if (bulkSel) {
+            bulkSel.innerHTML = '';
+            for (let i = 1; i <= maxMice; i++) {
+                const opt = document.createElement('option');
+                opt.value = i;
+                opt.textContent = `Mouse ${i} (${palette[i]?.name || 'M' + i})`;
+                bulkSel.appendChild(opt);
+            }
+            // 誤検出（除外）も一括適用できるようにする（ノイズトラックをまとめて除外）
+            const exOpt = document.createElement('option');
+            exOpt.value = '0';
+            exOpt.textContent = '🚫 誤検出（除外）';
+            bulkSel.appendChild(exOpt);
+        }
+
+        const searchInput = document.getElementById('confirmation-search');
+        const filterChk = document.getElementById('confirmation-filter-unassigned');
+        const bulkApply = document.getElementById('confirmation-bulk-apply');
+        const applySuggested = document.getElementById('confirmation-apply-suggested');
+        const clearAll = document.getElementById('confirmation-clear-all');
+
+        // 二重バインドを防ぐため onX プロパティで設定（再入時も上書きで安全）
+        if (searchInput) {
+            searchInput.value = '';
+            searchInput.oninput = (e) => {
+                appState.previewMode.filter.text = e.target.value.trim().toLowerCase();
+                rebuildConfirmationMappingList();
+            };
+        }
+        if (filterChk) {
+            filterChk.checked = false;
+            filterChk.onchange = (e) => {
+                appState.previewMode.filter.unassignedOnly = e.target.checked;
+                rebuildConfirmationMappingList();
+            };
+        }
+        // 一括割当：現在「表示中」のトラックすべてに選択IDを適用（フラグメント統合に有効）
+        if (bulkApply) {
+            bulkApply.onclick = () => {
+                const id = parseInt(bulkSel.value);
+                if (isNaN(id)) return;
+                const visible = getVisibleConfirmationTracks();
+                if (visible.length === 0) return;
+                const label = (id === 0) ? '誤検出（除外）' : `Mouse ${id}`;
+                if (!confirm(`表示中の ${visible.length} 件のトラックを「${label}」に割り当てます。よろしいですか？`)) return;
+                for (const t of visible) appState.confirmedMapping[t] = id;
+                rebuildConfirmationMappingList();
+                updateConfirmationProgress();
+                updateConfirmationNextButton();
+                updateUIForFrame();
+            };
+        }
+        // 自動候補（色推定）を全トラックへ採用
+        if (applySuggested) {
+            applySuggested.onclick = () => {
+                const sug = appState.previewMode.suggestedIds || {};
+                appState.confirmedMapping = { ...sug };
+                rebuildConfirmationMappingList();
+                updateConfirmationProgress();
+                updateConfirmationNextButton();
+                updateUIForFrame();
+            };
+        }
+        // 全クリア
+        if (clearAll) {
+            clearAll.onclick = () => {
+                if (!confirm('全トラックの割り当てを解除します。よろしいですか？')) return;
+                appState.confirmedMapping = {};
+                rebuildConfirmationMappingList();
+                updateConfirmationProgress();
+                updateConfirmationNextButton();
+                updateUIForFrame();
+            };
+        }
+    }
+
+    /** 現在のフィルタ条件（検索文字列・未割当のみ）に合致するトラック配列を返す。 */
+    function getVisibleConfirmationTracks() {
+        const f = appState.previewMode.filter || { text: '', unassignedOnly: false };
+        return appState.previewMode.detectedTracks.filter(track => {
+            // 「割当済み」はキー存在で判定（誤検出=0 も割当済み扱い）
+            const assigned = Object.prototype.hasOwnProperty.call(appState.confirmedMapping, track);
+            if (f.unassignedOnly && assigned) return false;
+            if (f.text && !String(track).toLowerCase().includes(f.text)) return false;
+            return true;
+        });
+    }
+
     function rebuildConfirmationMappingList() {
         const listDiv = document.getElementById('confirmation-mapping-list');
         if (!listDiv) return;
@@ -2216,23 +2772,80 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const palette = (typeof MOUSE_COLOR_PALETTE !== 'undefined') ? MOUSE_COLOR_PALETTE : {};
         const maxMice = (typeof MAX_MICE_LIMIT !== 'undefined') ? MAX_MICE_LIMIT : 8;
+        const fps = (appState.data && appState.data.fps) ? appState.data.fps : 30;
 
-        for (const track of appState.previewMode.detectedTracks) {
-            const currentId = appState.confirmedMapping[track] || '';
+        const visibleTracks = getVisibleConfirmationTracks();
+
+        // 絞り込み結果が空の場合の案内
+        if (visibleTracks.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'font-size:0.7rem; color:var(--text-muted); text-align:center; padding:10px;';
+            empty.textContent = '該当するトラックがありません（フィルタ条件を確認してください）。';
+            listDiv.appendChild(empty);
+            return;
+        }
+
+        // サムネイル生成キュー（このリビルドで表示する分のみ）
+        const thumbQueue = [];
+
+        for (const track of visibleTracks) {
+            // 割り当て状態の判定：0（誤検出）も「割当済み」として扱うため、
+            // truthy 判定ではなくキー存在で判定する（0 || '' は '' になってしまう罠を回避）。
+            const hasAssign = Object.prototype.hasOwnProperty.call(appState.confirmedMapping, track);
+            const currentId = hasAssign ? appState.confirmedMapping[track] : '';
+            const isExcluded = (currentId === 0);
             const row = document.createElement('div');
-            row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px; background:rgba(255,255,255,0.03); border-radius:3px;';
+            row.style.cssText = `display:flex; align-items:center; gap:6px; padding:4px; border-radius:3px; background:${isExcluded ? 'rgba(239,68,68,0.06)' : 'rgba(255,255,255,0.03)'};`;
+            if (isExcluded) row.style.opacity = '0.65';  // 誤検出は控えめに表示
 
-            // カラー色サンプル
+            // サムネイル（その枠の切り抜き）。動画から非同期で生成して埋める。
+            const thumb = document.createElement('canvas');
+            thumb.width = 40; thumb.height = 40;
+            thumb.style.cssText = 'width:40px; height:40px; border-radius:3px; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.15); flex-shrink:0; object-fit:cover;';
+            thumb.title = 'この枠の切り抜き（クリックで出現時刻へ移動）';
+            row.appendChild(thumb);
+            const range = appState.previewMode.trackFrameRange
+                ? appState.previewMode.trackFrameRange[track] : null;
+            thumbQueue.push({ track, canvas: thumb, range });
+
+            // カラー色サンプル（誤検出=0 は赤系、未割当は灰）
             const sample = document.createElement('div');
-            const colorHex = palette[currentId]?.hex || '#666';
+            const colorHex = isExcluded ? '#7F1D1D' : (palette[currentId]?.hex || '#666');
             sample.style.cssText = `width:14px; height:14px; border-radius:3px; background:${colorHex}; border:1px solid rgba(255,255,255,0.3); flex-shrink:0;`;
             row.appendChild(sample);
 
             // トラック名
             const trackLabel = document.createElement('span');
-            trackLabel.style.cssText = 'font-size:0.7rem; color:var(--text-secondary); flex: 1; font-family: monospace;';
+            trackLabel.style.cssText = 'font-size:0.7rem; color:var(--text-secondary); flex: 1; font-family: monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
             trackLabel.textContent = track;
             row.appendChild(trackLabel);
+
+            // 出現時刻ラベル：このトラックが動画の何分に現れるかを表示。
+            // クリックするとその時刻（出現開始フレーム）へシークし、枠を直接確認できる。
+            const timeBtn = document.createElement('button');
+            timeBtn.type = 'button';
+            timeBtn.style.cssText = 'font-size:0.66rem; font-family:monospace; color:#38BDF8; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.35); border-radius:3px; padding:2px 5px; cursor:pointer; flex-shrink:0; white-space:nowrap;';
+            const jumpToTrack = () => {
+                if (!range) return;
+                if (appState.isPlaying) togglePlay();
+                appState.currentFrame = range.first;
+                updateUIForFrame();
+            };
+            if (range) {
+                const t0 = formatTime(range.first / fps);
+                const t1 = formatTime(range.last / fps);
+                timeBtn.textContent = `▶ ${t0}`;
+                timeBtn.title = `このトラックの出現区間 ${t0}〜${t1}（クリックで開始時刻へ移動）`;
+                timeBtn.addEventListener('click', jumpToTrack);
+                thumb.style.cursor = 'pointer';
+                thumb.addEventListener('click', jumpToTrack);
+            } else {
+                timeBtn.textContent = '--:--';
+                timeBtn.disabled = true;
+                timeBtn.style.opacity = '0.4';
+                timeBtn.style.cursor = 'default';
+            }
+            row.appendChild(timeBtn);
 
             // ID セレクト
             const sel = document.createElement('select');
@@ -2248,24 +2861,177 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (parseInt(currentId) === i) opt.selected = true;
                 sel.appendChild(opt);
             }
+            // 誤検出（除外）オプション：mouse_id=0 を割り当てると解析・集計から完全に除外される
+            const exOpt = document.createElement('option');
+            exOpt.value = '0';
+            exOpt.textContent = '🚫 誤検出（除外）';
+            if (isExcluded) exOpt.selected = true;
+            sel.appendChild(exOpt);
             sel.addEventListener('change', (e) => {
                 const v = e.target.value;
                 if (v === '') {
                     delete appState.confirmedMapping[track];
                 } else {
+                    // '0'（誤検出）も含めて数値として保存する
                     appState.confirmedMapping[track] = parseInt(v);
                 }
-                // 色サンプル更新
-                sample.style.background = palette[appState.confirmedMapping[track]]?.hex || '#666';
+                // 行の見た目を in-place 更新（137 行でも全再構築せず軽快に保つ）
+                const assignedNow = Object.prototype.hasOwnProperty.call(appState.confirmedMapping, track);
+                const nowExcluded = (appState.confirmedMapping[track] === 0);
+                sample.style.background = nowExcluded ? '#7F1D1D' : (palette[appState.confirmedMapping[track]]?.hex || '#666');
+                row.style.background = nowExcluded ? 'rgba(239,68,68,0.06)' : 'rgba(255,255,255,0.03)';
+                row.style.opacity = nowExcluded ? '0.65' : '1';
                 updateConfirmationProgress();
                 updateConfirmationNextButton();
                 // 即座にビジュアルを更新
                 updateUIForFrame();
+                // 「未割当のみ」表示中に割当済みになった行はリストから外すため、その場合のみ再構築
+                if (appState.previewMode.filter.unassignedOnly && assignedNow) rebuildConfirmationMappingList();
             });
             row.appendChild(sel);
 
             listDiv.appendChild(row);
         }
+
+        // サムネイルを順次生成（動画シークを伴うため非同期・直列実行）
+        generateConfirmationThumbnails(thumbQueue);
+    }
+
+    // ── 確認リスト用サムネイル生成（専用の隠し video を用い、本体の再生を妨げない） ──
+    let _thumbVideo = null;       // サムネ抽出専用の <video>
+    let _thumbBusy = false;       // 直列実行ロック
+    function _getThumbVideo() {
+        const bg = document.getElementById('bg-video');
+        const src = bg && (bg.currentSrc || bg.src);
+        if (!src) return null;
+        if (!_thumbVideo) {
+            _thumbVideo = document.createElement('video');
+            _thumbVideo.muted = true;
+            _thumbVideo.playsInline = true;
+            _thumbVideo.preload = 'auto';
+            // crossOrigin は設定しない：動画は同一オリジン配信 or blob のため不要で、
+            // 設定すると CORS ヘッダ未送出時に canvas 描画が逆に阻害されうる。
+        }
+        if (_thumbVideo.src !== src) _thumbVideo.src = src;
+        return _thumbVideo;
+    }
+
+    let _latestThumbQueue = null;  // 最新のサムネ生成要求（リビルドのたびに上書き）
+    /**
+     * thumbQueue: [{ track, canvas, range }] のサムネイルを直列生成する。
+     * ワーカーは1つだけ走り、処理中に新しい要求が来たら現行ジョブ完了後に最新分を続けて処理する
+     * （フィルタを素早く切り替えても取りこぼさない）。
+     * 生成結果は appState.previewMode.thumbCache に dataURL でキャッシュし再利用する。
+     */
+    async function generateConfirmationThumbnails(thumbQueue) {
+        _latestThumbQueue = thumbQueue;
+        if (_thumbBusy) return;   // 既存ワーカーが finally で最新キューを拾う
+        _thumbBusy = true;
+        try {
+            while (_latestThumbQueue) {
+                const q = _latestThumbQueue;
+                _latestThumbQueue = null;
+                await _processThumbQueue(q);
+            }
+        } catch (err) {
+            console.warn('[thumbnail] 生成中にエラー:', err);
+        } finally {
+            _thumbBusy = false;
+        }
+    }
+
+    async function _processThumbQueue(thumbQueue) {
+        const cache = appState.previewMode.thumbCache || (appState.previewMode.thumbCache = {});
+        const previewData = appState.previewMode.previewData;
+        if (!previewData) return;
+
+        // まずキャッシュ済みは即描画
+        const pending = [];
+        for (const item of thumbQueue) {
+            if (!item.canvas || !document.body.contains(item.canvas)) continue;
+            if (cache[item.track]) {
+                _paintThumbFromDataURL(item.canvas, cache[item.track]);
+            } else if (item.range) {
+                pending.push(item);
+            }
+        }
+        if (pending.length === 0) return;
+
+        const vid = _getThumbVideo();
+        if (!vid) return;  // 動画未ロード時はサムネ無し（プレースホルダーのまま）
+
+        // メタデータ読込待ち
+        if (vid.readyState < 1) {
+            await new Promise((res) => {
+                const onMeta = () => { vid.removeEventListener('loadedmetadata', onMeta); res(); };
+                vid.addEventListener('loadedmetadata', onMeta);
+                setTimeout(res, 3000);  // フォールバック
+            });
+        }
+        const fps = (appState.data && appState.data.fps) ? appState.data.fps : 30;
+        for (const item of pending) {
+            // 行がリストから消えていたらスキップ（フィルタ変更等）
+            if (!document.body.contains(item.canvas)) continue;
+            const bbox = _lookupTrackBbox(previewData, item.track, item.range.first);
+            if (!bbox) continue;
+            const t = item.range.first / fps;
+            const dataUrl = await _captureThumb(vid, t, bbox);
+            if (dataUrl) {
+                cache[item.track] = dataUrl;
+                if (document.body.contains(item.canvas)) _paintThumbFromDataURL(item.canvas, dataUrl);
+            }
+        }
+    }
+
+    /** previewData から指定トラックの指定フレームにおける bbox を取得。 */
+    function _lookupTrackBbox(previewData, track, frameIdx) {
+        const entry = (previewData.frames || {})[String(frameIdx)];
+        if (!entry) return null;
+        for (const det of (entry.detections || [])) {
+            if (det.track === track && det.bbox) return det.bbox;
+        }
+        return null;
+    }
+
+    /** video を時刻 t にシークし、bbox 領域を切り抜いて 40x40 の dataURL を返す。 */
+    function _captureThumb(vid, t, bbox) {
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = (val) => { if (!done) { done = true; vid.removeEventListener('seeked', onSeeked); resolve(val); } };
+            const onSeeked = () => {
+                try {
+                    const [x1, y1, x2, y2] = bbox;
+                    const sw = Math.max(1, x2 - x1);
+                    const sh = Math.max(1, y2 - y1);
+                    // 正方形サムネに収めるため少し余白を付けて中央寄せ
+                    const off = document.createElement('canvas');
+                    off.width = 40; off.height = 40;
+                    const octx = off.getContext('2d');
+                    octx.fillStyle = '#000';
+                    octx.fillRect(0, 0, 40, 40);
+                    // アスペクト比維持でフィット
+                    const scale = Math.min(40 / sw, 40 / sh);
+                    const dw = sw * scale, dh = sh * scale;
+                    const dx = (40 - dw) / 2, dy = (40 - dh) / 2;
+                    octx.drawImage(vid, x1, y1, sw, sh, dx, dy, dw, dh);
+                    finish(off.toDataURL('image/jpeg', 0.7));
+                } catch (e) {
+                    // CORS 等で toDataURL が失敗する場合は諦める（プレースホルダーのまま）
+                    finish(null);
+                }
+            };
+            vid.addEventListener('seeked', onSeeked);
+            try { vid.currentTime = t; } catch (e) { finish(null); }
+            setTimeout(() => finish(null), 2500);  // シークが返らない場合のフォールバック
+        });
+    }
+
+    /** dataURL をサムネ canvas に描画する。 */
+    function _paintThumbFromDataURL(canvas, dataUrl) {
+        const ctx = canvas.getContext('2d');
+        const img = new Image();
+        img.onload = () => { ctx.clearRect(0, 0, 40, 40); ctx.drawImage(img, 0, 0, 40, 40); };
+        img.src = dataUrl;
     }
 
     function updateConfirmationStepLabel() {
@@ -2291,15 +3057,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateConfirmationNextButton() {
         const total = appState.previewMode.detectedTracks.length;
         const assigned = Object.keys(appState.confirmedMapping).length;
-        // 重複IDがあるとアサインメントが不正なため拒否
-        const assignedIds = Object.values(appState.confirmedMapping);
-        const hasDuplicate = new Set(assignedIds).size !== assignedIds.length;
         const nextBtn = document.getElementById('btn-confirmation-next');
         if (!nextBtn) return;
-        nextBtn.disabled = (assigned !== total) || hasDuplicate;
-        nextBtn.title = hasDuplicate
-            ? '同じ mouse_id を複数のトラックに割り当てることはできません'
-            : (assigned !== total ? '全トラックにIDを割り当ててください' : '');
+        // 重複IDは許容する。トラッキングが断片化すると 1 個体が複数トラックに分裂するため、
+        // 「複数トラック → 同一 mouse_id」は正当な統合操作であり、バックエンド
+        // （color_id.py: track.map(initial_mapping.get)）も問題なく処理できる。
+        // よって全トラックに割り当てが済んでいれば次へ進める。
+        nextBtn.disabled = (assigned !== total);
+        nextBtn.title = (assigned !== total) ? '全トラックにIDを割り当ててください' : '';
     }
 
     function handleConfirmationNext() {
@@ -2334,7 +3099,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (f >= numFrames) continue;
             for (const det of (frameEntry.detections || [])) {
                 const assignedId = appState.confirmedMapping[det.track];
-                if (!assignedId) continue;
+                // 未割当(undefined)・誤検出(0以下)は描画も解析もしない
+                if (!assignedId || assignedId <= 0) continue;
                 framesArray[f].mice[assignedId] = {
                     keypoints: det.keypoints,
                     scratch_flag: 0,
@@ -2345,8 +3111,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         appState.data.frames = framesArray;
-        // appState.miceIds を更新（appState.data.mice = appState.confirmedMapping の値域）
-        const ids = [...new Set(Object.values(appState.confirmedMapping))].sort((a, b) => a - b);
+        // appState.miceIds を更新（誤検出 ID=0 は個体に含めない）
+        const ids = [...new Set(Object.values(appState.confirmedMapping))]
+            .filter(v => v > 0).sort((a, b) => a - b);
         if (ids.length > 0) appState.miceIds = ids;
     }
 
@@ -2479,18 +3246,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 fileBadge.style.color = "#38BDF8";
             }
 
+            // [A-3] カラーID品質レポートJSONのURLを frame_labels.csv のURLから導出する
+            const qualityUrl = frameUrl.replace(/_frame_labels\.csv$/, '_id_quality.json');
+
             Promise.all([
                 fetch(frameUrl).then(res => {
                     if (!res.ok) throw new Error("CSVファイルを取得できませんでした。");
                     return res.text();
                 }),
-                boutsUrl ? fetch(boutsUrl).then(res => res.ok ? res.text() : '') : Promise.resolve('')
+                boutsUrl ? fetch(boutsUrl).then(res => res.ok ? res.text() : '') : Promise.resolve(''),
+                // 品質JSONは存在しない場合もある（旧結果）のでエラーを握り潰す
+                (qualityUrl !== frameUrl)
+                    ? fetch(qualityUrl).then(res => res.ok ? res.json() : null).catch(() => null)
+                    : Promise.resolve(null)
             ])
-            .then(([frameText, boutsText]) => {
+            .then(([frameText, boutsText, qualityJson]) => {
+                appState.idQuality = qualityJson || null;  // [A-3]
                 const parsedFrames = parseFrameCsv(frameText);
                 if (parsedFrames.length === 0) throw new Error("Parsed zero records");
 
-                const maxFrameIdx = Math.max(...parsedFrames.map(r => r.frame_idx));
+                // 大規模データ対策: Math.max(...array) は巨大配列でスプレッド展開すると
+                // 引数数が上限を超え "Maximum call stack size exceeded" で落ちるため、
+                // ループで最大フレーム番号を求める（数十万行でも安全）。
+                let maxFrameIdx = 0;
+                for (const r of parsedFrames) { if (r.frame_idx > maxFrameIdx) maxFrameIdx = r.frame_idx; }
                 const totalFrames = maxFrameIdx + 1;
 
                 const framesArray = [];
@@ -2509,6 +3288,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             keypoints: row.keypoints,
                             scratch_flag: row.scratch_flag,
                             scratch_prob: row.scratch_prob,
+                            id_confidence: row.id_confidence,  // [A-3]
                             features: row.features,
                             disabled: false,
                         };
@@ -2529,7 +3309,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (!frame.mice[mId] && f > 0 && framesArray[f-1].mice[mId]) {
                             const prev = framesArray[f-1].mice[mId];
                             frame.mice[mId] = {
-                                keypoints: JSON.parse(JSON.stringify(prev.keypoints)),
+                                keypoints: _cloneKeypoints(prev.keypoints),
                                 scratch_flag: 0, scratch_prob: 0,
                                 features: { ...prev.features }, disabled: false,
                             };
@@ -2561,6 +3341,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 finalizeImport(resName);
+                renderColorIdQuality();  // [A-3] カラーID品質パネルを更新
             })
             .catch(err => {
                 console.error("[Results-Loader] ロードエラー:", err);
@@ -2692,8 +3473,91 @@ document.addEventListener('DOMContentLoaded', () => {
             appState.undoStack.shift();
         }
         appState.redoStack = [];
-        appState.editedFrames.add(frameIdx);
+        markFrameMouseCorrected(frameIdx, mouseId);
         updateUndoRedoButtons();
+    }
+
+    /**
+     * [A-5] 指定フレーム×個体を「手動補正済み」として記録する。
+     * - frame.mice[mouseId]._corrected を立て、エクスポート CSV の is_manually_corrected 列に反映する。
+     * - editedFrames（フレーム単位インジケータ用）にも frameIdx を加える。
+     * これにより、自動パイプライン出力（プレビュー）と研究者が補正した確定値を
+     * 出力データ上で区別でき、学術的なデータ来歴（provenance）を担保する。
+     */
+    function markFrameMouseCorrected(frameIdx, mouseId) {
+        const frame = appState.data.frames[frameIdx];
+        if (frame && frame.mice[mouseId]) {
+            frame.mice[mouseId]._corrected = true;
+        }
+        appState.editedFrames.add(frameIdx);
+        updateCorrectionStatus();
+    }
+
+    /**
+     * [A-5] 表示中データの位置づけ（自動プレビュー or 手動補正済み）をUIに明示する。
+     * editedFrames が空 → 「自動解析プレビュー（未補正）」を青で表示。
+     * 補正があれば → 「手動補正済み（N フレーム）」を緑で表示し、出力CSVが確定値である旨を伝える。
+     */
+    function updateCorrectionStatus() {
+        const box = document.getElementById('correction-status');
+        const txt = document.getElementById('correction-status-text');
+        if (!box || !txt) return;
+        const n = appState.editedFrames ? appState.editedFrames.size : 0;
+        if (n > 0) {
+            txt.textContent = `手動補正済み（${n} フレーム）— 出力CSVは研究者確定値`;
+            box.style.background = 'rgba(16,185,129,0.10)';
+            box.style.borderColor = 'rgba(16,185,129,0.5)';
+            box.style.color = '#10B981';
+            const icon = box.querySelector('[data-lucide]');
+            if (icon) { icon.setAttribute('data-lucide', 'check-circle'); if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); }
+        } else {
+            txt.textContent = '自動解析プレビュー（未補正）';
+            box.style.background = 'rgba(56,189,248,0.08)';
+            box.style.borderColor = 'rgba(56,189,248,0.4)';
+            box.style.color = '#38BDF8';
+            const icon = box.querySelector('[data-lucide]');
+            if (icon) { icon.setAttribute('data-lucide', 'eye'); if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons(); }
+        }
+        updateStepGuide();
+    }
+
+    /**
+     * [B-1] ステップ型ワークフローガイドを現在の状態に同期する。
+     * 観測可能な appState から各ステップの完了状況を判定し、
+     * 「完了（緑）」「現在（青・最初の未完了）」「未着手（灰）」を表示する。
+     *   1 データ準備   : 実データロード or 動画ロード済み
+     *   2 校正         : 実測キャリブレーションを適用済み
+     *   3 ID確認       : 研究者が track→個体マッピングを確定済み
+     *   4 解析         : 自動解析結果（実データ）をロード済み
+     *   5 補正         : 手動補正フレームが1件以上
+     *   6 出力         : CSV/動画をエクスポート済み
+     */
+    function updateStepGuide() {
+        const guide = document.getElementById('step-guide');
+        if (!guide) return;
+        const done = {
+            data:       !!(appState.hasRealData || appState.videoW > 0),
+            calib:      !!appState.calibrationApplied,
+            idconfirm:  !!(appState.confirmedMapping && Object.keys(appState.confirmedMapping).length > 0),
+            analysis:   !!appState.hasRealData,
+            correction: !!(appState.editedFrames && appState.editedFrames.size > 0),
+            export:     !!appState.exported,
+        };
+        const order = ['data', 'calib', 'idconfirm', 'analysis', 'correction', 'export'];
+        // 現在ステップ = 「最後に完了したステップの次」。
+        // サーバ保存済み結果のロード（解析=完了だが校正/ID確認はダッシュボード外で実施）でも、
+        // 直感に合うよう「次に行うべきステップ」を強調する。
+        let lastDoneIdx = -1;
+        order.forEach((s, i) => { if (done[s]) lastDoneIdx = i; });
+        const currentStep = (lastDoneIdx >= 0 && lastDoneIdx < order.length - 1)
+            ? order[lastDoneIdx + 1]
+            : (lastDoneIdx < 0 ? order[0] : null);
+        order.forEach(s => {
+            const el = guide.querySelector(`.step-item[data-step="${s}"]`);
+            if (!el) return;
+            el.classList.toggle('step-done', done[s]);
+            el.classList.toggle('step-current', s === currentStep);
+        });
     }
 
     /**
@@ -2907,57 +3771,556 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' ||
                    (e.shiftKey && e.key.toLowerCase() === 'z'))) {
             e.preventDefault(); redo();
+        } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+            // ── B-3 Bout レビュー キーボードショートカット ──────────────────
+            // N=次, P=前, A=承認, R=却下。修飾キー無しのときのみ反応。
+            const k = e.key.toLowerCase();
+            if (k === 'n') { e.preventDefault(); gotoNextBout(); }
+            else if (k === 'p') { e.preventDefault(); gotoPrevBout(); }
+            else if (k === 'a') { e.preventDefault(); acceptCurrentBout(); }
+            else if (k === 'r') { e.preventDefault(); rejectCurrentBout(); }
         }
     });
 
-    // ── 閾値エディタ: 入力欄初期化 & 適用ボタン ──────────────────────────────
+    // ── B-3 Bout レビュー ツールバー ボタン配線 ──────────────────────────────
+    (function wireBoutReviewBar() {
+        const btnPrev = document.getElementById('btn-bout-prev');
+        const btnNext = document.getElementById('btn-bout-next');
+        const btnAcc = document.getElementById('btn-bout-accept');
+        const btnRej = document.getElementById('btn-bout-reject');
+        if (btnPrev) btnPrev.addEventListener('click', gotoPrevBout);
+        if (btnNext) btnNext.addEventListener('click', gotoNextBout);
+        if (btnAcc) btnAcc.addEventListener('click', acceptCurrentBout);
+        if (btnRej) btnRej.addEventListener('click', rejectCurrentBout);
+    })();
+
+    // ── 閾値エディタ: ライブプレビュー対応スライダー & 適用ボタン (B-4) ──────────
+    const thrMinVelRange  = document.getElementById('thr-min-vel-mms-range');
+    const thrMaxHeadRange = document.getElementById('thr-max-head-mm-range');
+    const thrMinOscRange  = document.getElementById('thr-min-osc-range');
+    const thrMinAmpRange  = document.getElementById('thr-min-osc-amp-range');
+    const thrLiveText     = document.getElementById('thr-live-text');
+    const thrLiveReadout  = document.getElementById('thr-live-readout');
+
+    // スライダー・数値入力・値ラベルを SCRATCH_THRESHOLDS の現在値に同期する。
     function syncThresholdInputs() {
-        if (thrMinVelMms) thrMinVelMms.value = SCRATCH_THRESHOLDS.minVelocityMmS;
-        if (thrMaxHeadMm) thrMaxHeadMm.value = SCRATCH_THRESHOLDS.maxHeadDistMm;
-        if (thrMinOsc)    thrMinOsc.value    = SCRATCH_THRESHOLDS.minOscillations;
-        if (thrMinOscAmp) thrMinOscAmp.value = SCRATCH_THRESHOLDS.minOscAmplitudeMm;
+        const set = (numEl, rangeEl, valId, v) => {
+            if (numEl) numEl.value = v;
+            if (rangeEl) rangeEl.value = v;
+            const valEl = document.getElementById(valId);
+            if (valEl) valEl.textContent = v;
+        };
+        set(thrMinVelMms, thrMinVelRange,  'thr-min-vel-mms-val', SCRATCH_THRESHOLDS.minVelocityMmS);
+        set(thrMaxHeadMm, thrMaxHeadRange, 'thr-max-head-mm-val', SCRATCH_THRESHOLDS.maxHeadDistMm);
+        set(thrMinOsc,    thrMinOscRange,  'thr-min-osc-val',     SCRATCH_THRESHOLDS.minOscillations);
+        set(thrMinOscAmp, thrMinAmpRange,  'thr-min-osc-amp-val', SCRATCH_THRESHOLDS.minOscAmplitudeMm);
     }
     syncThresholdInputs();
 
+    // 現在の入力値を検証して取得する。不正な場合は null を返す。
+    function readThresholdInputs() {
+        const newMinVel  = parseFloat(thrMinVelMms.value);
+        const newMaxHead = parseFloat(thrMaxHeadMm.value);
+        const newMinOsc  = parseInt(thrMinOsc.value);
+        const newMinAmp  = parseFloat(thrMinOscAmp.value);
+        if ([newMinVel, newMaxHead, newMinOsc, newMinAmp].some(v => isNaN(v) || v < 0)) return null;
+        return { newMinVel, newMaxHead, newMinOsc, newMinAmp };
+    }
+
+    // 閾値を SCRATCH_THRESHOLDS に反映し、全フレームを再計算して Bout・チャート・UI を更新する。
+    // ※ feature_extraction.py と同一の recalculateFrameKinematics を用いるため、
+    //   GUI プレビューとバックエンド本解析の判定結果は乖離しない（CLAUDE.md 同期ルール）。
+    function applyThresholdsLocal({ newMinVel, newMaxHead, newMinOsc, newMinAmp }) {
+        SCRATCH_THRESHOLDS.minVelocityMmS    = newMinVel;
+        SCRATCH_THRESHOLDS.maxHeadDistMm     = newMaxHead;
+        SCRATCH_THRESHOLDS.minOscillations   = newMinOsc;
+        SCRATCH_THRESHOLDS.minOscAmplitudeMm = newMinAmp;
+        // frame 0 は前フレームが無く速度算出不能のため f=1 から再計算する。
+        for (let f = 1; f < appState.data.numFrames; f++) {
+            for (const mId of appState.miceIds) {
+                recalculateFrameKinematics(f, mId);
+            }
+        }
+        autoGenerateBoutsFromFlags();
+        renderTimelineBouts();
+        renderBoutsList();
+        charts.updateAnalytics(appState.data.bouts);
+        updateUIForFrame(false);
+    }
+
+    // B-4: ライブプレビュー（デバウンス）。スライダー/数値入力の変更に追従して
+    // フロント側のみ即時再計算し、検出 Bout 数を読み取り表示に反映する。
+    // サーバ config への送信は行わない（確定は適用ボタンで実施）。
+    let thrLiveTimer = null;
+    function scheduleLivePreview() {
+        if (thrLiveTimer) clearTimeout(thrLiveTimer);
+        thrLiveTimer = setTimeout(() => {
+            const vals = readThresholdInputs();
+            if (!vals) { if (thrLiveText) thrLiveText.textContent = '⚠ 値が不正です'; return; }
+            applyThresholdsLocal(vals);
+            if (thrLiveText) thrLiveText.textContent = `検出 Bout: ${appState.data.bouts.length} 件（プレビュー）`;
+            if (thrLiveReadout) {
+                thrLiveReadout.classList.add('flash');
+                setTimeout(() => thrLiveReadout.classList.remove('flash'), 150);
+            }
+        }, 200);
+    }
+
+    // スライダー ↔ 数値入力 ↔ 値ラベル の双方向同期 + ライブプレビュー起動。
+    function wireThresholdPair(numEl, rangeEl, valId) {
+        if (!numEl || !rangeEl) return;
+        const valEl = document.getElementById(valId);
+        rangeEl.addEventListener('input', () => {
+            numEl.value = rangeEl.value;
+            if (valEl) valEl.textContent = rangeEl.value;
+            scheduleLivePreview();
+        });
+        numEl.addEventListener('input', () => {
+            rangeEl.value = numEl.value;
+            if (valEl) valEl.textContent = numEl.value;
+            scheduleLivePreview();
+        });
+    }
+    wireThresholdPair(thrMinVelMms, thrMinVelRange,  'thr-min-vel-mms-val');
+    wireThresholdPair(thrMaxHeadMm, thrMaxHeadRange, 'thr-max-head-mm-val');
+    wireThresholdPair(thrMinOsc,    thrMinOscRange,  'thr-min-osc-val');
+    wireThresholdPair(thrMinOscAmp, thrMinAmpRange,  'thr-min-osc-amp-val');
+
     if (btnApplyThresholds) {
         btnApplyThresholds.addEventListener('click', () => {
-            const newMinVel  = parseFloat(thrMinVelMms.value);
-            const newMaxHead = parseFloat(thrMaxHeadMm.value);
-            const newMinOsc  = parseInt(thrMinOsc.value);
-            const newMinAmp  = parseFloat(thrMinOscAmp.value);
-            if ([newMinVel, newMaxHead, newMinOsc, newMinAmp].some(v => isNaN(v) || v < 0)) {
-                alert("⚠️ 閾値は0以上の数値を入力してください。"); return;
-            }
-            SCRATCH_THRESHOLDS.minVelocityMmS    = newMinVel;
-            SCRATCH_THRESHOLDS.maxHeadDistMm     = newMaxHead;
-            SCRATCH_THRESHOLDS.minOscillations   = newMinOsc;
-            SCRATCH_THRESHOLDS.minOscAmplitudeMm = newMinAmp;
+            const vals = readThresholdInputs();
+            if (!vals) { alert("⚠️ 閾値は0以上の数値を入力してください。"); return; }
+            applyThresholdsLocal(vals);
 
-            // バックエンドへも反映 (失敗してもフロント側計算は続行)
+            // バックエンド config へ確定値を同期 (失敗してもフロント側計算は続行)
             fetch('/api/config-update', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    SCRATCH_MIN_VELOCITY_MM_S:    newMinVel,
-                    SCRATCH_MAX_HEAD_DIST_MM:     newMaxHead,
-                    SCRATCH_MIN_OSCILLATIONS:     newMinOsc,
-                    SCRATCH_MIN_OSC_AMPLITUDE_MM: newMinAmp,
+                    SCRATCH_MIN_VELOCITY_MM_S:    vals.newMinVel,
+                    SCRATCH_MAX_HEAD_DIST_MM:     vals.newMaxHead,
+                    SCRATCH_MIN_OSCILLATIONS:     vals.newMinOsc,
+                    SCRATCH_MIN_OSC_AMPLITUDE_MM: vals.newMinAmp,
                 })
             }).catch(err => console.warn('[Config] サーバ閾値同期失敗:', err));
 
-            // 全フレーム再計算 (動的 mice ループ)
-            for (let f = 1; f < appState.data.numFrames; f++) {
-                for (const mId of appState.miceIds) {
-                    recalculateFrameKinematics(f, mId);
-                }
-            }
-            autoGenerateBoutsFromFlags();
-            renderTimelineBouts();
-            renderBoutsList();
-            charts.updateAnalytics(appState.data.bouts);
-            updateUIForFrame(false);
-            alert(`✓ 閾値を適用して全フレーム再計算しました。\n  最小速度: ${newMinVel} mm/s\n  後肢↔耳 間距離上限: ${newMaxHead} mm\n  最小振動: ${newMinOsc}\n  最小振幅: ${newMinAmp} mm`);
+            if (thrLiveText) thrLiveText.textContent = `検出 Bout: ${appState.data.bouts.length} 件（確定・サーバ同期済）`;
+            alert(`✓ 閾値を適用してサーバへ同期しました。\n  最小速度: ${vals.newMinVel} mm/s\n  後肢↔耳 間距離上限: ${vals.newMaxHead} mm\n  最小振動: ${vals.newMinOsc}\n  最小振幅: ${vals.newMinAmp} mm\n  検出 Bout: ${appState.data.bouts.length} 件`);
         });
+    }
+
+    // ── A-2 実測校正ウィザード: 動画上の既知長を2点クリックして mm/px を実測 ──────
+    // 計測は canvas 内部座標系（= 動画ピクセル空間）で行う。resizeCanvasToVideo() により
+    // canvas.width/height を動画ネイティブ解像度に合わせることで、getMousePos が返す座標が
+    // 動画上の真のピクセル座標に一致し、pipeline.py の px-to-mm と整合する。
+    (function initCalibrationWizard() {
+        const btnMeasure   = document.getElementById('btn-calibrate-measure');
+        const statusBox     = document.getElementById('calibrate-status');
+        const statusText    = document.getElementById('calibrate-status-text');
+        const lengthRow     = document.getElementById('calibrate-length-row');
+        const lengthInput   = document.getElementById('calibrate-length-mm');
+        const btnApply      = document.getElementById('btn-calibrate-apply');
+        const btnReset      = document.getElementById('btn-calibrate-reset');
+        const resultBox     = document.getElementById('calibrate-result');
+        if (!btnMeasure || !statusBox) return;
+
+        // 計測のために canvas を動画解像度へ強制リサイズした場合に元へ戻すためのフラグ
+        let resizedForCalib = false;
+
+        function endMeasureMode() {
+            visualizer.setMeasureMode(false);
+            statusBox.style.display = 'none';
+            lengthRow.style.display = 'none';
+            resultBox.style.display = 'none';
+            btnMeasure.innerHTML = '<i data-lucide="crosshair" style="width:12px; height:12px;"></i>2点計測を開始';
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+            // 解析データが無い状態で canvas を動画解像度に変更していた場合はデフォルトへ戻す
+            if (resizedForCalib && !appState.hasRealData) {
+                resetCanvasToDefault();
+                updateUIForFrame(false);
+            }
+            resizedForCalib = false;
+        }
+
+        btnMeasure.addEventListener('click', () => {
+            if (visualizer.measureMode) { endMeasureMode(); return; }
+
+            if (!appState.videoW || !appState.videoH) {
+                alert('⚠️ 先に動画を読み込んでください。\n実測校正は動画上の既知長を計測するため、動画の表示が必要です。');
+                return;
+            }
+            // canvas 内部解像度を動画ピクセル空間に合わせる（解析前でも計測可能にする）
+            if (visualizer.canvas.width !== appState.videoW || visualizer.canvas.height !== appState.videoH) {
+                resizeCanvasToVideo();
+                resizedForCalib = true;
+            }
+
+            visualizer.setMeasureMode(true);
+            statusBox.style.display = 'block';
+            resultBox.style.display = 'none';
+            lengthRow.style.display = 'none';
+            statusText.textContent = '動画上で1点目（既知長の一端）をクリックしてください。';
+            btnMeasure.innerHTML = '<i data-lucide="x" style="width:12px; height:12px;"></i>計測を終了';
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+        });
+
+        // 計測点が変化するたびに呼ばれる
+        visualizer.onMeasureUpdate = (points) => {
+            if (points.length === 0) {
+                statusText.textContent = '動画上で1点目（既知長の一端）をクリックしてください。';
+                lengthRow.style.display = 'none';
+                resultBox.style.display = 'none';
+            } else if (points.length === 1) {
+                statusText.textContent = '2点目（既知長のもう一端）をクリックしてください。';
+                lengthRow.style.display = 'none';
+            } else {
+                const distPx = visualizer.getMeasuredPixelDistance();
+                statusText.textContent = `2点間のピクセル距離: ${distPx.toFixed(1)} px。実距離を入力して「適用」を押してください。`;
+                lengthRow.style.display = 'flex';
+                lengthInput.focus();
+            }
+        };
+
+        if (btnReset) {
+            btnReset.addEventListener('click', () => visualizer.clearMeasurePoints());
+        }
+
+        if (btnApply) {
+            btnApply.addEventListener('click', () => {
+                const distPx = visualizer.getMeasuredPixelDistance();
+                if (distPx == null || distPx < 1) {
+                    alert('⚠️ 2点が近すぎるか未計測です。動画上で2点をクリックし直してください。');
+                    return;
+                }
+                const realMm = parseFloat(lengthInput.value);
+                if (isNaN(realMm) || realMm <= 0) {
+                    alert('⚠️ 実距離（mm）に正の数値を入力してください。');
+                    return;
+                }
+                // mm/px = 実距離(mm) ÷ ピクセル距離(px)
+                const ratio = realMm / distPx;
+
+                // フロント側の校正値を更新
+                SCRATCH_THRESHOLDS.pixelToMmRatio = ratio;
+                if (pipelineCalibration) pipelineCalibration.value = ratio.toFixed(4);
+                appState.calibrationApplied = true;  // [B-1] 校正ステップ完了
+                if (typeof updateStepGuide === 'function') updateStepGuide();
+
+                // バックエンドのランタイム config にも反映（失敗してもフロント計算は続行）
+                fetch('/api/config-update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ PIXEL_TO_MM_RATIO: ratio })
+                }).catch(err => console.warn('[Calib] サーバ校正値同期失敗:', err));
+
+                // 校正値変更で mm/s・mm 特徴量が変わるため全フレーム再計算
+                for (let f = 1; f < appState.data.numFrames; f++) {
+                    for (const mId of appState.miceIds) {
+                        recalculateFrameKinematics(f, mId);
+                    }
+                }
+                autoGenerateBoutsFromFlags();
+                renderTimelineBouts();
+                renderBoutsList();
+                charts.updateAnalytics(appState.data.bouts);
+
+                resultBox.style.display = 'block';
+                resultBox.textContent = `✓ 校正完了: ${ratio.toFixed(4)} mm/px （${realMm} mm ÷ ${distPx.toFixed(1)} px）`;
+
+                // 計測モードを終了（canvas を元の状態へ戻す）
+                endMeasureMode();
+                // endMeasureMode が statusBox を隠すので、結果だけ再表示する
+                statusBox.style.display = 'block';
+                statusText.textContent = '校正値を適用しました。再計測する場合は「2点計測を開始」を押してください。';
+                resultBox.style.display = 'block';
+                updateUIForFrame(false);
+            });
+        }
+    })();
+
+    // ── A-1 精度評価 (Ground Truth 照合) パネル ──────────────────────────────
+    // /api/evaluate を呼び出し、フレーム/Bout レベルの混同行列・各種指標を表示する。
+    // サーバーは CSV をパスで読み込むため、自動検出 CSV は /api/results 由来の
+    // outputs/ 相対パス、GT CSV はユーザー入力のパス（絶対 or outputs/相対）を渡す。
+    (function initEvaluationPanel() {
+        const autoSelect  = document.getElementById('eval-auto-csv');
+        const gtPathInput = document.getElementById('eval-gt-path');
+        const gtFormatSel  = document.getElementById('eval-gt-format');
+        const fpsInput     = document.getElementById('eval-fps');
+        const iouInput     = document.getElementById('eval-iou');
+        const btnRun       = document.getElementById('btn-run-evaluate');
+        const btnRefresh   = document.getElementById('btn-eval-refresh');
+        const statusBox    = document.getElementById('eval-status');
+        const frameWrap    = document.getElementById('eval-frame-results');
+        const boutWrap     = document.getElementById('eval-bout-results');
+        const frameTable   = document.getElementById('eval-frame-table');
+        const boutTable    = document.getElementById('eval-bout-table');
+        if (!btnRun || !autoSelect) return;
+
+        // URL "/outputs/foo/bar.csv" → evaluate が解決できる "foo/bar.csv" に変換
+        function urlToOutputsPath(url) {
+            if (!url) return null;
+            return url.replace(/^\/?outputs\//, '');
+        }
+
+        function populateAutoResults() {
+            fetch('/api/results')
+                .then(r => r.json())
+                .then(data => {
+                    autoSelect.innerHTML = '<option value="" selected>-- サーバー結果から選択 --</option>';
+                    (data.results || []).forEach(res => {
+                        const opt = document.createElement('option');
+                        opt.value = urlToOutputsPath(res.frame_csv_url);
+                        opt.dataset.boutsPath = urlToOutputsPath(res.bouts_csv_url) || '';
+                        opt.textContent = res.name;
+                        autoSelect.appendChild(opt);
+                    });
+                })
+                .catch(err => console.warn('[Eval] 結果リスト取得失敗:', err));
+        }
+        populateAutoResults();
+        if (btnRefresh) btnRefresh.addEventListener('click', populateAutoResults);
+
+        function setStatus(msg, kind) {
+            statusBox.style.display = 'block';
+            statusBox.textContent = msg;
+            const styles = {
+                info:    ['rgba(56,189,248,0.1)',  '#38BDF8'],
+                error:   ['rgba(239,68,68,0.1)',   '#EF4444'],
+                success: ['rgba(16,185,129,0.1)',  '#10B981'],
+            };
+            const [bg, fg] = styles[kind] || styles.info;
+            statusBox.style.background = bg;
+            statusBox.style.color = fg;
+        }
+
+        // 指標値を 0–1 の良し悪しで色分け（precision/recall/f1/kappa 等の高いほど良い指標用）
+        function metricClass(v) {
+            if (v == null || isNaN(v)) return '';
+            if (v >= 0.8) return 'eval-metric-good';
+            if (v >= 0.5) return 'eval-metric-mid';
+            return 'eval-metric-bad';
+        }
+        function fmt(v, digits = 3) {
+            return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(digits);
+        }
+        function mouseLabel(mid) {
+            const c = visualizer.mouseColors[mid];
+            return c ? `Mouse ${mid} (${c.name})` : `Mouse ${mid}`;
+        }
+        function mouseColor(mid) {
+            const c = visualizer.mouseColors[mid];
+            return c ? c.hex : '#AAAAAA';
+        }
+
+        function renderFrameTable(rows) {
+            if (!rows || rows.length === 0) { frameWrap.style.display = 'none'; return; }
+            const head = `<thead><tr>
+                <th>個体</th><th>フレーム数</th>
+                <th>Precision</th><th>Recall</th><th>F1</th><th>Cohen's κ</th>
+                <th>TP</th><th>FP</th><th>FN</th><th>TN</th>
+            </tr></thead>`;
+            const body = rows.map(r => `<tr>
+                <td class="eval-mouse-cell" style="color:${mouseColor(r.mouse_id)}">${mouseLabel(r.mouse_id)}</td>
+                <td>${r.n_frames ?? '—'}</td>
+                <td class="${metricClass(r.precision)}">${fmt(r.precision)}</td>
+                <td class="${metricClass(r.recall)}">${fmt(r.recall)}</td>
+                <td class="${metricClass(r.f1)}">${fmt(r.f1)}</td>
+                <td class="${metricClass(r.kappa)}">${fmt(r.kappa)}</td>
+                <td>${r.tp ?? '—'}</td><td>${r.fp ?? '—'}</td><td>${r.fn ?? '—'}</td><td>${r.tn ?? '—'}</td>
+            </tr>`).join('');
+            frameTable.innerHTML = head + `<tbody>${body}</tbody>`;
+            frameWrap.style.display = 'block';
+        }
+
+        function renderBoutTable(rows) {
+            if (!rows || rows.length === 0) { boutWrap.style.display = 'none'; return; }
+            const head = `<thead><tr>
+                <th>個体</th><th>GT Bouts</th><th>自動 Bouts</th>
+                <th>TP</th><th>FP</th><th>FN</th>
+                <th>感度 (Sensitivity)</th><th>FDR</th><th>Precision</th><th>F1</th>
+            </tr></thead>`;
+            const body = rows.map(r => `<tr>
+                <td class="eval-mouse-cell" style="color:${mouseColor(r.mouse_id)}">${mouseLabel(r.mouse_id)}</td>
+                <td>${r.n_gt_bouts ?? '—'}</td><td>${r.n_auto_bouts ?? '—'}</td>
+                <td>${r.tp_bouts ?? '—'}</td><td>${r.fp_bouts ?? '—'}</td><td>${r.fn_bouts ?? '—'}</td>
+                <td class="${metricClass(r.sensitivity)}">${fmt(r.sensitivity)}</td>
+                <td>${fmt(r.fdr)}</td>
+                <td class="${metricClass(r.precision_bout)}">${fmt(r.precision_bout)}</td>
+                <td class="${metricClass(r.f1_bout)}">${fmt(r.f1_bout)}</td>
+            </tr>`).join('');
+            boutTable.innerHTML = head + `<tbody>${body}</tbody>`;
+            boutWrap.style.display = 'block';
+        }
+
+        btnRun.addEventListener('click', () => {
+            const autoPath = autoSelect.value;
+            const gtPath   = gtPathInput.value.trim();
+            if (!autoPath) { setStatus('⚠️ 自動検出結果 CSV を選択してください。', 'error'); return; }
+            if (!gtPath)   { setStatus('⚠️ Ground Truth CSV のパスを入力してください。', 'error'); return; }
+
+            const fmtVal = gtFormatSel.value;
+            const fps    = parseFloat(fpsInput.value) || 30.0;
+            const iou    = parseFloat(iouInput.value) || 0.5;
+            // 選択された結果に対応する bouts.csv（あれば bout 指標に使用）
+            const opt = autoSelect.options[autoSelect.selectedIndex];
+            const boutsPath = opt && opt.dataset.boutsPath ? opt.dataset.boutsPath : null;
+
+            setStatus('評価を実行中...', 'info');
+            frameWrap.style.display = 'none';
+            boutWrap.style.display = 'none';
+            btnRun.disabled = true;
+
+            fetch('/api/evaluate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    auto_frame_csv: autoPath,
+                    gt_csv: gtPath,
+                    gt_format: fmtVal,
+                    fps: fps,
+                    iou_threshold: iou,
+                    auto_bouts_csv: boutsPath,
+                })
+            })
+            .then(res => {
+                if (!res.ok) return res.json().then(e => { throw new Error(e.detail || '評価エラー'); });
+                return res.json();
+            })
+            .then(data => {
+                renderFrameTable(data.frame_metrics);
+                renderBoutTable(data.bout_metrics);
+                const nf = (data.frame_metrics || []).length;
+                const nb = (data.bout_metrics || []).length;
+                const saved = (data.output_files || []).length;
+                setStatus(`✓ 評価完了: フレーム指標 ${nf} 個体, Bout 指標 ${nb} 個体。`
+                    + (saved ? ` 結果CSVを outputs/ に保存しました（${saved} ファイル）。` : ''), 'success');
+                if (nf === 0 && nb === 0) {
+                    setStatus('⚠️ 指標が算出されませんでした。GTと自動結果の mouse_id / 列名が一致しているか確認してください。', 'error');
+                }
+            })
+            .catch(err => {
+                console.error('[Eval] 評価失敗:', err);
+                setStatus(`⚠️ 評価に失敗しました: ${err.message}`, 'error');
+            })
+            .finally(() => { btnRun.disabled = false; });
+        });
+    })();
+
+    // ── A-3 カラーID品質管理パネルのレンダリング ────────────────────────────
+    // 個体ごとのID信頼度（採用色の得票率）・低信頼フレーム数・Swap（混同）検知件数を
+    // 可視化する。品質JSON（{basename}_id_quality.json）が無い場合は、フレームCSVの
+    // id_confidence 列から個体別サマリーをクライアント側で再集計してフォールバック表示する。
+    function renderColorIdQuality() {
+        const panel = document.getElementById('colorid-qc-panel');
+        if (!panel) return;
+        const summaryWrap = document.getElementById('colorid-qc-summary');
+        const swapWrap    = document.getElementById('colorid-qc-swaps');
+        const statusBox   = document.getElementById('colorid-qc-status');
+
+        const LOW_THRESH = (appState.idQuality && appState.idQuality.low_conf_threshold) || 0.70;
+
+        // 個体別サマリーを決定: 品質JSON優先、無ければ frame id_confidence から再集計
+        let perMouse = {};
+        let swapEvents = [];
+        let source = 'frames';
+
+        if (appState.idQuality && appState.idQuality.per_mouse) {
+            perMouse = appState.idQuality.per_mouse;
+            swapEvents = appState.idQuality.swap_events || [];
+            source = appState.idQuality.source || 'pipeline';
+        } else {
+            // フォールバック: ロード済みフレームから id_confidence を集計
+            const acc = {};  // mId -> {sum, n, nLow, hasConf}
+            const frames = (appState.data && appState.data.frames) || [];
+            frames.forEach(fr => {
+                for (const mId in fr.mice) {
+                    const conf = fr.mice[mId].id_confidence;
+                    if (conf == null || isNaN(conf)) continue;
+                    const a = acc[mId] || (acc[mId] = { sum: 0, n: 0, nLow: 0 });
+                    a.sum += conf; a.n += 1;
+                    if (conf < LOW_THRESH) a.nLow += 1;
+                }
+            });
+            for (const mId in acc) {
+                const a = acc[mId];
+                perMouse[mId] = {
+                    mean_confidence: a.n ? a.sum / a.n : 0,
+                    n_frames: a.n,
+                    n_low_conf_frames: a.nLow,
+                };
+            }
+        }
+
+        const mouseIds = Object.keys(perMouse).map(Number).sort((x, y) => x - y);
+
+        // id_confidence データが全く無い（旧CSV・手動データ等）場合はパネルを隠す
+        if (mouseIds.length === 0) {
+            panel.style.display = 'none';
+            return;
+        }
+        panel.style.display = 'block';
+
+        function confClass(v) {
+            if (v == null || isNaN(v)) return '';
+            if (v >= 0.85) return 'eval-metric-good';
+            if (v >= LOW_THRESH) return 'eval-metric-mid';
+            return 'eval-metric-bad';
+        }
+        function colorFor(mid) {
+            const c = visualizer.mouseColors[mid];
+            return c ? c.hex : '#AAAAAA';
+        }
+        function labelFor(mid) {
+            const c = visualizer.mouseColors[mid];
+            return c ? `Mouse ${mid} (${c.name})` : `Mouse ${mid}`;
+        }
+
+        // 個体別サマリー表
+        const rows = mouseIds.map(mid => {
+            const q = perMouse[mid];
+            const conf = q.mean_confidence;
+            const pct = (conf * 100).toFixed(1);
+            const low = q.n_low_conf_frames || 0;
+            const total = q.n_frames || 0;
+            const lowPct = total ? ((low / total) * 100).toFixed(1) : '0.0';
+            const warn = (conf < LOW_THRESH || (total && low / total > 0.2));
+            return `<tr>
+                <td class="eval-mouse-cell" style="color:${colorFor(mid)}">${labelFor(mid)}</td>
+                <td class="${confClass(conf)}">${pct}%</td>
+                <td>${low} / ${total} (${lowPct}%)</td>
+                <td>${warn ? '<span style="color:#EF4444;">⚠ 要確認</span>' : '<span style="color:#10B981;">✓ 良好</span>'}</td>
+            </tr>`;
+        }).join('');
+
+        summaryWrap.innerHTML = `<table class="eval-table">
+            <thead><tr>
+                <th>個体</th><th>平均ID信頼度</th>
+                <th>低信頼フレーム (&lt;${(LOW_THRESH * 100).toFixed(0)}%)</th><th>判定</th>
+            </tr></thead><tbody>${rows}</tbody></table>`;
+
+        // Swap（混同）イベント一覧
+        if (swapEvents.length > 0) {
+            const fps = (appState.data && appState.data.fps) || 30;
+            const items = swapEvents.map(ev => {
+                const t = (ev.frame_idx / fps).toFixed(1);
+                return `<li>フレーム <strong>${ev.frame_idx}</strong> (${t}s): トラック <code>${ev.orig_track}</code> で色変化を検知し自動分割</li>`;
+            }).join('');
+            swapWrap.innerHTML = `<div class="qc-swap-title">⚠ Identity Swap（個体取り違え）検知: ${swapEvents.length} 件</div>
+                <ul class="qc-swap-list">${items}</ul>
+                <div class="qc-swap-note">これらの時点付近では自動トラッキングが個体を取り違えた可能性があります。手動でID割り当てを確認してください。</div>`;
+            swapWrap.style.display = 'block';
+        } else {
+            swapWrap.innerHTML = '';
+            swapWrap.style.display = 'none';
+        }
+
+        if (statusBox) {
+            const srcLabel = source === 'confirmed_mapping'
+                ? '（研究者が確認したIDマッピングに基づく — 信頼度は最高値）'
+                : (source === 'frames' ? '（フレームCSVから再集計）' : '（パイプライン品質レポートに基づく）');
+            statusBox.textContent = `ID品質サマリー ${srcLabel}`;
+        }
     }
 
     // --- 13. Initial Kickoff ---
@@ -2975,9 +4338,267 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     initDynamicMiceUI(appState.miceIds);
     updateUndoRedoButtons();
+    updateCorrectionStatus();  // [A-5] 初期表示はプレビュー状態
     updateUIForFrame();
     renderTimelineBouts();
     renderBoutsList();
     refreshServerResultsList(); // Auto-load server results list on kickoff
+
+    // ── Layer 1: ケージマスク編集 ロジック ────────────────────────────────
+    // 装置領域を多角形で塗り、検出後フィルタで装置の誤検出を除外する。
+    // 動画ピクセル座標で多角形を保持し、サーバへ JSON で送信する。
+    // CSS 表示サイズと動画解像度の差異を考慮した座標変換を行う点に注意。
+    initCageMaskUI();
+
+    function initCageMaskUI() {
+        const btnEdit       = document.getElementById('btn-edit-cage-mask');
+        const modal         = document.getElementById('cage-mask-modal');
+        const maskCanvas    = document.getElementById('cage-mask-canvas');
+        const statusLabel   = document.getElementById('cage-mask-status');
+        const btnFinishPoly = document.getElementById('btn-mask-finish-poly');
+        const btnUndo       = document.getElementById('btn-mask-undo');
+        const btnClear      = document.getElementById('btn-mask-clear');
+        const btnSave       = document.getElementById('btn-mask-save');
+        const btnCancel     = document.getElementById('btn-mask-cancel');
+        if (!btnEdit || !modal || !maskCanvas) return;
+        const ctx = maskCanvas.getContext('2d');
+
+        // 編集開始: 既存マスクがあればロードし、モーダルを表示
+        btnEdit.addEventListener('click', async () => {
+            if (!appState.videoW || !appState.videoH) {
+                alert('動画をロードしてからケージマスクを編集してください。');
+                return;
+            }
+            const videoName = (btnRunPipeline.dataset.videoName || 'unnamed.mp4');
+            appState.cageMask.videoName = videoName;
+            appState.cageMask.inProgress = [];
+            // サーバから既存マスクを取得
+            try {
+                const stem = videoName.replace(/\.[^/.]+$/, '');
+                const res = await fetch(`/api/cage_mask/${encodeURIComponent(stem)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    appState.cageMask.polygons = (data.exclude_polygons || []).map(poly =>
+                        poly.map(pt => [pt[0], pt[1]])
+                    );
+                } else {
+                    appState.cageMask.polygons = [];
+                }
+            } catch (err) {
+                console.warn('[CageMask] 既存マスク取得失敗 (新規作成として続行):', err);
+                appState.cageMask.polygons = [];
+            }
+            openMaskEditor();
+        });
+
+        function openMaskEditor() {
+            appState.cageMask.active = true;
+            modal.style.display = 'block';
+            resizeMaskCanvas();
+            drawMaskCanvas();
+            // 動画は一時停止（フレームを固定して編集しやすくする）
+            if (appState.isPlaying && typeof togglePlay === 'function') togglePlay();
+        }
+
+        function closeMaskEditor() {
+            appState.cageMask.active = false;
+            appState.cageMask.inProgress = [];
+            modal.style.display = 'none';
+        }
+
+        function resizeMaskCanvas() {
+            // 内部解像度を動画解像度に合わせ、CSS は親要素いっぱいに広げる
+            // これにより polygon 座標が動画ピクセル空間で扱える
+            const vW = appState.videoW || 800;
+            const vH = appState.videoH || 550;
+            if (maskCanvas.width !== vW || maskCanvas.height !== vH) {
+                maskCanvas.width = vW;
+                maskCanvas.height = vH;
+            }
+            // CSS サイズは bg-video の object-fit:contain と合わせる必要があるため、
+            // cage-canvas と同じレターボックス位置に揃える
+            const cage = document.getElementById('cage-canvas');
+            if (cage) {
+                maskCanvas.style.left   = cage.style.left   || '0';
+                maskCanvas.style.top    = cage.style.top    || '0';
+                maskCanvas.style.width  = cage.style.width  || '100%';
+                maskCanvas.style.height = cage.style.height || '100%';
+            }
+        }
+
+        // マウス座標 → canvas 内部座標 (= 動画ピクセル座標)
+        function getCanvasPoint(evt) {
+            const rect = maskCanvas.getBoundingClientRect();
+            const sx = maskCanvas.width  / rect.width;
+            const sy = maskCanvas.height / rect.height;
+            return [
+                Math.max(0, Math.min(maskCanvas.width,  (evt.clientX - rect.left) * sx)),
+                Math.max(0, Math.min(maskCanvas.height, (evt.clientY - rect.top ) * sy)),
+            ];
+        }
+
+        function drawMaskCanvas() {
+            ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+            // 確定済み多角形（赤の半透明塗り + 実線縁取り）
+            ctx.save();
+            for (const poly of appState.cageMask.polygons) {
+                if (poly.length < 3) continue;
+                ctx.beginPath();
+                ctx.moveTo(poly[0][0], poly[0][1]);
+                for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.28)';
+                ctx.fill();
+                ctx.strokeStyle = '#EF4444';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            // 編集中の多角形（緑の点線 + 頂点マーカー）
+            const ip = appState.cageMask.inProgress;
+            if (ip.length > 0) {
+                ctx.save();
+                ctx.strokeStyle = '#22C55E';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 4]);
+                ctx.beginPath();
+                ctx.moveTo(ip[0][0], ip[0][1]);
+                for (let i = 1; i < ip.length; i++) ctx.lineTo(ip[i][0], ip[i][1]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // 各頂点を丸で表示
+                for (const [px, py] of ip) {
+                    ctx.beginPath();
+                    ctx.arc(px, py, 5, 0, Math.PI * 2);
+                    ctx.fillStyle = '#22C55E';
+                    ctx.fill();
+                    ctx.strokeStyle = '#FFFFFF';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+                ctx.restore();
+            }
+
+            // ステータス更新
+            const nPoly = appState.cageMask.polygons.length;
+            const nPoints = ip.length;
+            if (nPoints > 0) {
+                statusLabel.textContent = `編集中: ${nPoints} 点配置 (3点以上で確定可能) / 確定済み多角形: ${nPoly}`;
+            } else if (nPoly > 0) {
+                statusLabel.textContent = `確定済み多角形: ${nPoly} / 装置の角をクリックして新しい多角形を追加`;
+            } else {
+                statusLabel.textContent = '装置の角をクリックして多角形を作成 → ダブルクリック or Enter で確定';
+            }
+        }
+
+        function finishCurrentPolygon() {
+            if (appState.cageMask.inProgress.length >= 3) {
+                appState.cageMask.polygons.push(appState.cageMask.inProgress.slice());
+                appState.cageMask.inProgress = [];
+                drawMaskCanvas();
+            } else if (appState.cageMask.inProgress.length > 0) {
+                statusLabel.textContent = `多角形には最低 3 点必要です (現在 ${appState.cageMask.inProgress.length} 点)`;
+                statusLabel.style.color = '#FF8080';
+                setTimeout(() => { statusLabel.style.color = ''; drawMaskCanvas(); }, 1500);
+            }
+        }
+
+        // クリック: 点追加 / ダブルクリック: 多角形確定
+        maskCanvas.addEventListener('click', (e) => {
+            const pt = getCanvasPoint(e);
+            appState.cageMask.inProgress.push(pt);
+            drawMaskCanvas();
+        });
+        maskCanvas.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            finishCurrentPolygon();
+        });
+
+        // Enter: 確定 / Escape: キャンセル
+        document.addEventListener('keydown', (e) => {
+            if (!appState.cageMask.active) return;
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                finishCurrentPolygon();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeMaskEditor();
+            } else if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                btnUndo.click();
+            }
+        });
+
+        btnFinishPoly.addEventListener('click', finishCurrentPolygon);
+
+        btnUndo.addEventListener('click', () => {
+            if (appState.cageMask.inProgress.length > 0) {
+                appState.cageMask.inProgress.pop();
+            } else if (appState.cageMask.polygons.length > 0) {
+                // 編集中の点がない場合は最後の確定多角形を再編集対象に戻す
+                appState.cageMask.inProgress = appState.cageMask.polygons.pop();
+            }
+            drawMaskCanvas();
+        });
+
+        btnClear.addEventListener('click', () => {
+            if (!confirm('すべての多角形を消去しますか？')) return;
+            appState.cageMask.polygons = [];
+            appState.cageMask.inProgress = [];
+            drawMaskCanvas();
+        });
+
+        btnSave.addEventListener('click', async () => {
+            // 編集中の多角形があれば自動確定
+            if (appState.cageMask.inProgress.length >= 3) {
+                appState.cageMask.polygons.push(appState.cageMask.inProgress.slice());
+                appState.cageMask.inProgress = [];
+            }
+            const videoName = appState.cageMask.videoName || 'unnamed.mp4';
+            const payload = {
+                video: videoName,
+                video_width:  appState.videoW || 0,
+                video_height: appState.videoH || 0,
+                // 動画ピクセル座標で送信。サーバ側は小数 1 桁程度で十分。
+                exclude_polygons: appState.cageMask.polygons.map(poly =>
+                    poly.map(pt => [Math.round(pt[0] * 10) / 10, Math.round(pt[1] * 10) / 10])
+                ),
+            };
+            try {
+                btnSave.disabled = true;
+                btnSave.textContent = '保存中...';
+                const res = await fetch('/api/cage_mask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const err = await res.text();
+                    throw new Error(`HTTP ${res.status}: ${err}`);
+                }
+                const result = await res.json();
+                console.log('[CageMask] 保存完了:', result);
+                closeMaskEditor();
+            } catch (err) {
+                alert(`マスク保存に失敗しました: ${err.message || err}`);
+            } finally {
+                btnSave.disabled = false;
+                btnSave.textContent = '保存して閉じる';
+            }
+        });
+
+        btnCancel.addEventListener('click', closeMaskEditor);
+
+        // ウィンドウリサイズ時に canvas を再フィット
+        window.addEventListener('resize', () => {
+            if (appState.cageMask.active) {
+                resizeMaskCanvas();
+                drawMaskCanvas();
+            }
+        });
+    }
+
     lucide.createIcons();
 });

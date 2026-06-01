@@ -12,3 +12,7 @@ test_swap.mp4
 models/
 .claude/
 .vscode/
+
+# Runtime task DB (contains local absolute paths / large embedded data)
+tasks_db.json
+tasks_db.json.tmp

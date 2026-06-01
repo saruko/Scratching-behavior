@@ -55,6 +55,41 @@
         </div>
 
         <!-- ========================================== -->
+        <!-- B-1: ステップ型ワークフローガイド            -->
+        <!-- ========================================== -->
+        <div id="step-guide" class="step-guide">
+            <div class="step-item" data-step="data">
+                <div class="step-num">1</div>
+                <div class="step-label">データ準備<br><span class="step-sub">CSV / 動画</span></div>
+            </div>
+            <div class="step-arrow">›</div>
+            <div class="step-item" data-step="calib">
+                <div class="step-num">2</div>
+                <div class="step-label">校正<br><span class="step-sub">mm/px 計測</span></div>
+            </div>
+            <div class="step-arrow">›</div>
+            <div class="step-item" data-step="idconfirm">
+                <div class="step-num">3</div>
+                <div class="step-label">ID確認<br><span class="step-sub">個体割当</span></div>
+            </div>
+            <div class="step-arrow">›</div>
+            <div class="step-item" data-step="analysis">
+                <div class="step-num">4</div>
+                <div class="step-label">解析<br><span class="step-sub">自動検出</span></div>
+            </div>
+            <div class="step-arrow">›</div>
+            <div class="step-item" data-step="correction">
+                <div class="step-num">5</div>
+                <div class="step-label">補正<br><span class="step-sub">手動修正</span></div>
+            </div>
+            <div class="step-arrow">›</div>
+            <div class="step-item" data-step="export">
+                <div class="step-num">6</div>
+                <div class="step-label">出力<br><span class="step-sub">CSV / 動画</span></div>
+            </div>
+        </div>
+
+        <!-- ========================================== -->
         <!-- MAIN WORKSPACE GRID                        -->
         <!-- ========================================== -->
         <main class="workspace-grid">
@@ -140,6 +175,30 @@
                                     <span style="font-size: 0.72rem; color: var(--text-secondary);">キャリブレーション (mm/px):</span>
                                     <input type="number" id="pipeline-calibration" value="0.25" step="0.01" min="0.01" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 60px; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem;">
                                 </div>
+
+                                <!-- A-2 実測校正ウィザード: 動画上の既知長を2点クリックして mm/px を実測する -->
+                                <div style="background: rgba(34, 211, 238, 0.05); border: 1px solid rgba(34, 211, 238, 0.25); border-radius: 6px; padding: 7px 8px; display: flex; flex-direction: column; gap: 6px;">
+                                    <div style="font-size: 0.7rem; color: #22D3EE; font-weight: 600; display:flex; align-items:center; gap:4px;">
+                                        <i data-lucide="ruler" style="width:12px; height:12px;"></i>実測校正ウィザード
+                                    </div>
+                                    <div style="font-size: 0.66rem; color: var(--text-muted); line-height: 1.45;">
+                                        動画に映る<strong>既知の長さ</strong>（物差し・ケージ内寸など）の両端を2点クリックし、実距離を入力すると mm/px を自動算出します。
+                                    </div>
+                                    <button id="btn-calibrate-measure" class="mouse-btn" style="padding: 5px; background: rgba(34, 211, 238, 0.1); border-color: rgba(34, 211, 238, 0.5); text-align: center; justify-content: center; font-size: 0.7rem; font-weight:600;">
+                                        <i data-lucide="crosshair" style="width:12px; height:12px;"></i>2点計測を開始
+                                    </button>
+                                    <div id="calibrate-status" style="display:none; font-size: 0.66rem; color: var(--text-secondary); line-height: 1.45; background: rgba(0,0,0,0.3); border-radius: 4px; padding: 5px 6px;">
+                                        <span id="calibrate-status-text">動画上で1点目をクリックしてください。</span>
+                                        <div id="calibrate-length-row" style="display:none; margin-top: 6px; align-items: center; gap: 5px;">
+                                            <span style="white-space:nowrap;">実距離:</span>
+                                            <input type="number" id="calibrate-length-mm" placeholder="例: 100" step="0.1" min="0.01" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 64px; padding:2px 4px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.7rem;">
+                                            <span style="white-space:nowrap;">mm</span>
+                                            <button id="btn-calibrate-apply" class="mouse-btn" style="flex:1; padding: 4px; background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.5); text-align:center; justify-content:center; font-size: 0.68rem; font-weight:600;">適用</button>
+                                            <button id="btn-calibrate-reset" class="mouse-btn" style="padding: 4px 6px; background: rgba(255,255,255,0.05); text-align:center; justify-content:center; font-size: 0.68rem;">やり直し</button>
+                                        </div>
+                                        <div id="calibrate-result" style="display:none; margin-top: 6px; font-weight: 600; color: #10B981;"></div>
+                                    </div>
+                                </div>
                                 <div style="display: flex; align-items: center; justify-content: space-between;">
                                     <span style="font-size: 0.72rem; color: var(--text-secondary);">モデルパス (任意):</span>
                                     <input type="text" id="pipeline-model-path" placeholder="自動検出" style="background: rgba(0,0,0,0.5); border:1px solid var(--border-color); color:#fff; width: 100px; padding:2px 4px; border-radius:4px; font-size: 0.7rem; text-align:right;">
@@ -213,7 +272,38 @@
                                     Step 1/2: バウンディングボックスの確認
                                 </div>
                                 <div style="font-size: 0.68rem; color: var(--text-secondary); line-height: 1.5;">
-                                    動画冒頭<strong>5分</strong>を解析しました。シークバーで任意の時刻に移動し、各検出に正しいマウスIDを割り当ててください。
+                                    動画冒頭<strong>5分</strong>を解析しました。シークバーで任意の時刻に移動し、各検出に正しいマウスIDを割り当ててください。各トラック横の<strong style="color:#38BDF8;">▶ 時刻</strong>ボタンを押すと、その枠が出現する時刻へジャンプします。ノイズや装置の誤認識は <strong style="color:#F87171;">🚫 誤検出（除外）</strong> を選ぶと解析・集計から完全に除外されます。
+                                </div>
+
+                                <!-- 割り当て効率化ツールバー（多数のトラックを素早く処理するための補助操作） -->
+                                <div id="confirmation-toolbar" style="display:flex; flex-direction:column; gap:6px; background: rgba(0,0,0,0.2); border:1px solid rgba(168,85,247,0.2); border-radius:5px; padding:6px;">
+                                    <!-- 検索＋未割当フィルタ -->
+                                    <div style="display:flex; gap:6px; align-items:center;">
+                                        <input type="text" id="confirmation-search" placeholder="トラック名で絞り込み..."
+                                               style="flex:1; font-size:0.68rem; background:rgba(0,0,0,0.4); color:var(--text-primary); border:1px solid var(--border-color); border-radius:3px; padding:3px 6px;">
+                                        <label style="display:flex; align-items:center; gap:4px; font-size:0.66rem; color:var(--text-secondary); white-space:nowrap; cursor:pointer;">
+                                            <input type="checkbox" id="confirmation-filter-unassigned"> 未割当のみ
+                                        </label>
+                                    </div>
+                                    <!-- 一括割り当て：選択IDを「現在表示中の」トラックへまとめて適用 -->
+                                    <div style="display:flex; gap:6px; align-items:center;">
+                                        <select id="confirmation-bulk-id"
+                                                style="flex:1; font-size:0.68rem; background:rgba(0,0,0,0.4); color:var(--text-primary); border:1px solid var(--border-color); border-radius:3px; padding:3px 4px;">
+                                            <!-- JS が個体IDオプションを生成 -->
+                                        </select>
+                                        <button id="confirmation-bulk-apply" type="button"
+                                                style="font-size:0.66rem; padding:3px 8px; background:rgba(56,189,248,0.15); border:1px solid rgba(56,189,248,0.5); color:#38BDF8; border-radius:3px; cursor:pointer; white-space:nowrap;"
+                                                title="現在リストに表示中のトラックすべてに、左で選んだIDを一括適用します">表示中に一括適用</button>
+                                    </div>
+                                    <!-- 一括操作ショートカット -->
+                                    <div style="display:flex; gap:6px; align-items:center;">
+                                        <button id="confirmation-apply-suggested" type="button"
+                                                style="flex:1; font-size:0.64rem; padding:3px 6px; background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.4); color:#22C55E; border-radius:3px; cursor:pointer;"
+                                                title="色から自動推定された候補IDを全トラックに採用します">自動候補を全採用</button>
+                                        <button id="confirmation-clear-all" type="button"
+                                                style="flex:1; font-size:0.64rem; padding:3px 6px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.4); color:#F87171; border-radius:3px; cursor:pointer;"
+                                                title="全トラックの割り当てを解除します">全クリア</button>
+                                    </div>
                                 </div>
 
                                 <!-- 検出ごとのID割り当てリスト（動的生成） -->
@@ -413,30 +503,63 @@
                                 <i data-lucide="settings-2" style="width:14px; height:14px;"></i>判定閾値の調整 (上級者向け)
                             </summary>
                             <div style="font-size: 0.68rem; color: var(--text-muted); margin: 8px 0; line-height: 1.4;">
-                                変更内容はサーバ及びフロント GUI 双方の判定ロジックに即時反映され、ひっかき Bout が再計算されます。
+                                スライダーを動かすと GUI 上の判定が<strong>即座に再計算</strong>され、ひっかき Bout 数がライブ更新されます（プレビュー）。確定するには「適用 &amp; サーバ同期」を押してください。
                             </div>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
-                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小速度 (mm/s)
-                                    <input type="number" id="thr-min-vel-mms" step="10" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
-                                </label>
-                                <label style="font-size: 0.7rem; color: var(--text-secondary);">後肢↔耳 間距離上限 (mm)
-                                    <input type="number" id="thr-max-head-mm" step="5" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
-                                </label>
-                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振動数
-                                    <input type="number" id="thr-min-osc" step="1" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
-                                </label>
-                                <label style="font-size: 0.7rem; color: var(--text-secondary);">最小振幅 (mm)
-                                    <input type="number" id="thr-min-osc-amp" step="0.5" min="0" style="background: rgba(0,0,0,0.4); border:1px solid var(--border-color); color:#fff; width: 100%; padding:3px 5px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.75rem; margin-top: 3px; box-sizing: border-box;">
-                                </label>
+                            <!-- B-4: ライブプレビュー対応 閾値スライダー -->
+                            <div class="thr-slider-grid">
+                                <div class="thr-slider-row">
+                                    <label for="thr-min-vel-mms">最小速度 <span class="thr-val" id="thr-min-vel-mms-val">150</span> mm/s</label>
+                                    <div class="thr-slider-line">
+                                        <input type="range" id="thr-min-vel-mms-range" min="0" max="400" step="5" class="thr-range">
+                                        <input type="number" id="thr-min-vel-mms" step="5" min="0" class="thr-num">
+                                    </div>
+                                </div>
+                                <div class="thr-slider-row">
+                                    <label for="thr-max-head-mm">後肢↔耳 間距離上限 <span class="thr-val" id="thr-max-head-mm-val">50</span> mm</label>
+                                    <div class="thr-slider-line">
+                                        <input type="range" id="thr-max-head-mm-range" min="0" max="150" step="1" class="thr-range">
+                                        <input type="number" id="thr-max-head-mm" step="1" min="0" class="thr-num">
+                                    </div>
+                                </div>
+                                <div class="thr-slider-row">
+                                    <label for="thr-min-osc">最小振動数 <span class="thr-val" id="thr-min-osc-val">10</span></label>
+                                    <div class="thr-slider-line">
+                                        <input type="range" id="thr-min-osc-range" min="0" max="20" step="1" class="thr-range">
+                                        <input type="number" id="thr-min-osc" step="1" min="0" class="thr-num">
+                                    </div>
+                                </div>
+                                <div class="thr-slider-row">
+                                    <label for="thr-min-osc-amp">最小振幅 <span class="thr-val" id="thr-min-osc-amp-val">0.75</span> mm</label>
+                                    <div class="thr-slider-line">
+                                        <input type="range" id="thr-min-osc-amp-range" min="0" max="5" step="0.05" class="thr-range">
+                                        <input type="number" id="thr-min-osc-amp" step="0.05" min="0" class="thr-num">
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- B-4: ライブ結果インジケータ（検出 Bout 数の即時フィードバック） -->
+                            <div class="thr-live-readout" id="thr-live-readout">
+                                <i data-lucide="activity" style="width:12px; height:12px;"></i>
+                                <span id="thr-live-text">検出 Bout: -- 件</span>
                             </div>
                             <button id="btn-apply-thresholds" class="mouse-btn" style="margin-top: 8px; padding: 7px; background: rgba(251, 191, 36, 0.12); border-color: #FBBF24; text-align: center; justify-content: center; font-size: 0.75rem; font-weight:600; width: 100%;">
-                                <i data-lucide="check" style="width: 13px; height: 13px;"></i> 閾値を適用 & 再計算
+                                <i data-lucide="check" style="width: 13px; height: 13px;"></i> 適用 & サーバ同期（確定）
                             </button>
                         </details>
+
+                        <!-- A-5: 手動補正ステータス（プレビュー / 補正済みの明示） -->
+                        <div id="correction-status" style="display:flex; align-items:center; gap:8px; padding: 8px 10px; border-radius: 6px; font-size: 0.74rem; font-weight:600; border:1px solid; background: rgba(56,189,248,0.08); border-color: rgba(56,189,248,0.4); color:#38BDF8;">
+                            <i data-lucide="eye" style="width:14px; height:14px; flex-shrink:0;"></i>
+                            <span id="correction-status-text">自動解析プレビュー（未補正）</span>
+                        </div>
 
                         <!-- Export corrected CSV -->
                         <button id="btn-export-csv" class="mouse-btn" style="padding: 10px; background: linear-gradient(135deg, #10B981 0%, #059669 100%); border:none; text-align: center; justify-content: center; font-weight:600; color:#fff; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);">
                             <i data-lucide="download" style="width:16px; height:16px; margin-right:5px;"></i>補正後 CSV の出力 (Export)
+                        </button>
+
+                        <!-- [B-5] 出版用エクスポート（個体別統計 + 来歴 manifest + 図） -->
+                        <button id="btn-export-publication" class="mouse-btn" style="padding: 10px; background: linear-gradient(135deg, #0EA5E9 0%, #2563EB 100%); border:none; text-align: center; justify-content: center; font-weight:600; color:#fff; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);" title="個体別のひっかき統計（Bout数・総時間・平均/中央値）、解析パラメータ来歴 manifest、グラフ図(PNG)を一括で書き出します">
+                            <i data-lucide="file-bar-chart-2" style="width:16px; height:16px; margin-right:5px;"></i>出版用エクスポート (統計 + 来歴 + 図)
                         </button>
 
                         <!-- === NEW: Annotated Video Export === -->
@@ -488,15 +611,38 @@
 
                         <!-- RIGHT: Overlay Video Panel (video + canvas) -->
                         <div class="video-panel">
-                            <div class="video-panel-label" style="color: #A855F7; border-color: rgba(168, 85, 247, 0.3);">
-                                <i data-lucide="eye" style="width: 12px; height: 12px;"></i>
-                                マーカーオーバーレイ (Overlay)
+                            <div class="video-panel-label" style="color: #A855F7; border-color: rgba(168, 85, 247, 0.3); display: flex; align-items: center; justify-content: space-between;">
+                                <span><i data-lucide="eye" style="width: 12px; height: 12px;"></i> マーカーオーバーレイ (Overlay)</span>
+                                <!-- Layer 1: ケージマスク編集ボタン -->
+                                <button id="btn-edit-cage-mask" type="button"
+                                    style="background: rgba(168, 85, 247, 0.12); border: 1px solid rgba(168, 85, 247, 0.45); color: #A855F7; font-size: 0.68rem; padding: 2px 8px; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                                    title="ケージ装置（給水器・餌器など）の領域を多角形で塗り、誤検出から除外します">
+                                    <i data-lucide="hexagon" style="width: 11px; height: 11px;"></i> ケージマスク編集
+                                </button>
                             </div>
                             <div class="video-panel-inner" style="background: #000;">
                                 <!-- Background video -->
                                 <video id="bg-video" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1;" muted playsinline></video>
                                 <!-- Overlay canvas (skeleton markers) -->
                                 <canvas id="cage-canvas" width="800" height="550" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; cursor: default; background-color: transparent;"></canvas>
+                                <!-- Layer 1: ケージマスク編集オーバーレイ (動画+canvas の上に重ねる) -->
+                                <div id="cage-mask-modal" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; z-index:5; background: rgba(10, 12, 20, 0.55);">
+                                    <canvas id="cage-mask-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%; cursor: crosshair;"></canvas>
+                                    <!-- 操作パネル -->
+                                    <div style="position:absolute; top:8px; left:8px; right:8px; background: rgba(0,0,0,0.78); border:1px solid rgba(168,85,247,0.4); border-radius: 6px; padding: 8px 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                                        <span style="font-size: 0.72rem; color: #A855F7; font-weight: 600;">
+                                            <i data-lucide="hexagon" style="width: 12px; height: 12px;"></i> ケージマスク編集中
+                                        </span>
+                                        <span id="cage-mask-status" style="font-size: 0.68rem; color: var(--text-muted); flex: 1;">
+                                            装置の角をクリックして多角形を作成 → ダブルクリック or Enter で確定
+                                        </span>
+                                        <button id="btn-mask-finish-poly" type="button" style="font-size: 0.68rem; padding: 3px 8px; background: rgba(168,85,247,0.2); border: 1px solid #A855F7; color: #fff; border-radius: 3px; cursor: pointer;" title="現在の多角形を確定">確定 (Enter)</button>
+                                        <button id="btn-mask-undo" type="button" style="font-size: 0.68rem; padding: 3px 8px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-secondary); border-radius: 3px; cursor: pointer;" title="最後に置いた点を取り消し">点を戻す</button>
+                                        <button id="btn-mask-clear" type="button" style="font-size: 0.68rem; padding: 3px 8px; background: rgba(255,80,80,0.1); border: 1px solid rgba(255,80,80,0.4); color: #FF8080; border-radius: 3px; cursor: pointer;" title="全多角形を消去">全消去</button>
+                                        <button id="btn-mask-save" type="button" style="font-size: 0.68rem; padding: 3px 10px; background: rgba(34,197,94,0.18); border: 1px solid #22C55E; color: #22C55E; border-radius: 3px; cursor: pointer; font-weight: 600;" title="マスクを保存して閉じる">保存して閉じる</button>
+                                        <button id="btn-mask-cancel" type="button" style="font-size: 0.68rem; padding: 3px 8px; background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-muted); border-radius: 3px; cursor: pointer;" title="変更を破棄して閉じる">キャンセル</button>
+                                    </div>
+                                </div>
                                 <!-- "No video" placeholder -->
                                 <div id="overlay-video-placeholder" class="video-placeholder">
                                     <i data-lucide="layers" style="width: 36px; height: 36px; color: rgba(168, 85, 247, 0.3); margin-bottom: 10px;"></i>
@@ -514,6 +660,24 @@
                         <div class="time-display">
                             <span id="time-current">00:00.00</span>
                             <span id="time-total" style="color: var(--text-muted);">/ --:--.--</span>
+                        </div>
+
+                        <!-- 動画直下のシークバー（動画全体のどこを見ているか即座に把握できるよう、
+                             再生コントロール内に配置。タイムラインパネルの scrub-slider と双方向同期） -->
+                        <input type="range" id="playback-seek-slider" class="playback-seek-slider"
+                               min="0" max="0" value="0" aria-label="動画シークバー" title="ドラッグで任意時刻へ移動">
+
+                        <!-- B-2: キーポイント信頼度カラー表示トグル + 凡例 -->
+                        <div class="confidence-toggle-group" id="confidence-toggle-group" title="各キーポイントの推定信頼度を外周リング色で表示します（信頼度データがあるエンジンのみ）">
+                            <label class="confidence-toggle">
+                                <input type="checkbox" id="toggle-confidence" checked>
+                                <span>信頼度カラー</span>
+                            </label>
+                            <span class="conf-legend">
+                                <span class="conf-dot" style="border-color:#22C55E;"></span>高
+                                <span class="conf-dot" style="border-color:#EAB308;"></span>中
+                                <span class="conf-dot" style="border-color:#EF4444;"></span>低
+                            </span>
                         </div>
                     </div>
                 </div>
@@ -631,9 +795,18 @@
                 </div>
 
                 <!-- Bouts Feed Panel -->
-                <div class="panel-card" style="flex: 1 1 auto; max-height: 200px;">
-                    <div class="panel-header">
+                <div class="panel-card" style="flex: 1 1 auto; max-height: 240px;">
+                    <div class="panel-header" style="flex-direction: column; align-items: stretch; gap: 8px;">
                         <h2 class="panel-title"><i data-lucide="list-video" style="width: 16px; height: 16px;"></i>ひっかき検出エピソード (Bouts)</h2>
+                        <!-- B-3: Bout レビュー ツールバー（前後ジャンプ / 採否 / 進捗） -->
+                        <div class="bout-review-bar" id="bout-review-bar">
+                            <button class="bout-nav-btn" id="btn-bout-prev" title="前の Bout へ (P)"><i data-lucide="chevron-left" style="width:14px;height:14px;"></i></button>
+                            <button class="bout-nav-btn" id="btn-bout-next" title="次の Bout へ (N)"><i data-lucide="chevron-right" style="width:14px;height:14px;"></i></button>
+                            <span class="bout-review-current" id="bout-review-current">レビュー未開始</span>
+                            <button class="bout-review-btn accept" id="btn-bout-accept" title="この Bout を承認 (A)"><i data-lucide="check" style="width:13px;height:13px;"></i>承認</button>
+                            <button class="bout-review-btn reject" id="btn-bout-reject" title="この Bout を却下＝誤検出として除去 (R)"><i data-lucide="x" style="width:13px;height:13px;"></i>却下</button>
+                            <span class="bout-review-progress" id="bout-review-progress"></span>
+                        </div>
                     </div>
                     <div class="panel-body" style="padding: 12px; overflow-y: auto;" id="bouts-list-container">
                         <!-- Filled by app.js -->
@@ -666,6 +839,127 @@
                         <canvas id="chart-bout-durations"></canvas>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- A-1: 精度評価 (Ground Truth 照合) パネル      -->
+    <!-- ========================================== -->
+    <div style="padding: 0 20px 20px 20px;">
+        <div class="panel-card">
+            <div class="panel-header">
+                <h2 class="panel-title"><i data-lucide="check-check" style="width: 18px; height: 18px;"></i>精度評価 (Ground Truth 照合)</h2>
+            </div>
+            <div class="panel-body" style="padding: 16px; display: flex; flex-direction: column; gap: 14px;">
+
+                <!-- 入力フォーム -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; align-items: end;">
+                    <!-- 自動検出 CSV 選択 -->
+                    <label style="display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--text-secondary);">
+                        自動検出結果 (frame_labels.csv)
+                        <div style="display:flex; gap:4px;">
+                            <select id="eval-auto-csv" class="speed-select" style="flex:1; font-size: 0.72rem; padding: 5px 6px; background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; border-radius:4px;">
+                                <option value="" selected>-- サーバー結果から選択 --</option>
+                            </select>
+                            <button id="btn-eval-refresh" class="mouse-btn" title="サーバー結果を再スキャン" style="padding: 4px 7px; justify-content:center;">
+                                <i data-lucide="refresh-cw" style="width:13px; height:13px;"></i>
+                            </button>
+                        </div>
+                    </label>
+
+                    <!-- GT CSV パス -->
+                    <label style="display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--text-secondary);">
+                        手動 Ground Truth CSV のパス
+                        <input type="text" id="eval-gt-path" placeholder="例: outputs/cage_01_gt.csv または絶対パス" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; padding: 5px 6px; border-radius:4px; font-size: 0.72rem; box-sizing: border-box;">
+                    </label>
+
+                    <!-- GT フォーマット -->
+                    <label style="display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--text-secondary);">
+                        GT フォーマット
+                        <select id="eval-gt-format" class="speed-select" style="font-size: 0.72rem; padding: 5px 6px; background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; border-radius:4px;">
+                            <option value="frame" selected>frame（フレーム単位ラベル）</option>
+                            <option value="bout">bout（区間ラベル）</option>
+                        </select>
+                    </label>
+
+                    <!-- FPS -->
+                    <label style="display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--text-secondary);">
+                        FPS
+                        <input type="number" id="eval-fps" value="30" step="1" min="1" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; padding: 5px 6px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.72rem; box-sizing: border-box;">
+                    </label>
+
+                    <!-- IoU 閾値 (bout 用) -->
+                    <label style="display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--text-secondary);" title="Bout レベル照合における時間的 IoU 閾値（区間がこの割合以上重なれば一致とみなす）">
+                        Bout IoU 閾値
+                        <input type="number" id="eval-iou" value="0.5" step="0.05" min="0.05" max="1" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-color); color:#fff; padding: 5px 6px; border-radius:4px; font-family:monospace; text-align:center; font-size: 0.72rem; box-sizing: border-box;">
+                    </label>
+
+                    <button id="btn-run-evaluate" class="mouse-btn" style="padding: 8px; background: rgba(16, 185, 129, 0.12); border-color: #10B981; text-align: center; justify-content: center; font-size: 0.78rem; font-weight:600;">
+                        <i data-lucide="play" style="width:14px; height:14px;"></i>評価を実行
+                    </button>
+                </div>
+
+                <!-- GT フォーマット説明 -->
+                <details style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px 10px;">
+                    <summary style="font-size: 0.72rem; color: var(--text-secondary); cursor: pointer; user-select: none;">
+                        <i data-lucide="help-circle" style="width: 12px; height: 12px; display: inline;"></i> Ground Truth CSV の形式について
+                    </summary>
+                    <div style="font-size: 0.7rem; color: var(--text-muted); line-height: 1.6; padding-top: 8px;">
+                        サーバーがファイルを読み込むため、GT CSV は<strong>サーバーと同じPC上</strong>に置き、<code>outputs/</code> 配下のファイル名（例 <code>cage_01_gt.csv</code>）または絶対パスを入力してください。<br>
+                        <strong>frame 形式</strong>（フレーム単位）: 列見出し <code>frame_idx, mouse_id, is_scratch</code>。<code>is_scratch</code> は 0/1。各フレーム×各個体について1行。<br>
+                        <strong>bout 形式</strong>（区間単位）: 列見出し <code>mouse_id, start_frame, end_frame</code>（または <code>start_time_s, end_time_s</code>）。ひっかき区間ごとに1行。<br>
+                        ※ frame 形式では frame/bout 両方の指標が、bout 形式では bout 指標のみが算出されます。
+                    </div>
+                </details>
+
+                <!-- ステータス -->
+                <div id="eval-status" style="display:none; font-size: 0.74rem; padding: 8px 10px; border-radius: 6px;"></div>
+
+                <!-- フレームレベル指標テーブル -->
+                <div id="eval-frame-results" style="display:none;">
+                    <h3 style="font-size: 0.8rem; color: var(--text-primary); font-weight: 600; margin: 0 0 8px 0;">フレームレベル指標 / 混同行列</h3>
+                    <div style="overflow-x:auto;">
+                        <table class="eval-table" id="eval-frame-table" style="width:100%; border-collapse: collapse; font-size: 0.72rem;"></table>
+                    </div>
+                </div>
+
+                <!-- Bout レベル指標テーブル -->
+                <div id="eval-bout-results" style="display:none;">
+                    <h3 style="font-size: 0.8rem; color: var(--text-primary); font-weight: 600; margin: 0 0 8px 0;">Bout レベル指標</h3>
+                    <div style="overflow-x:auto;">
+                        <table class="eval-table" id="eval-bout-table" style="width:100%; border-collapse: collapse; font-size: 0.72rem;"></table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- A-3: カラーID品質管理パネル                  -->
+    <!-- ========================================== -->
+    <div style="padding: 0 20px 20px 20px;">
+        <div id="colorid-qc-panel" class="panel-card" style="display:none;">
+            <div class="panel-header">
+                <h2 class="panel-title"><i data-lucide="fingerprint" style="width: 18px; height: 18px;"></i>カラーID品質管理</h2>
+            </div>
+            <div class="panel-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
+                <div id="colorid-qc-status" style="font-size: 0.72rem; color: var(--text-secondary);"></div>
+                <div style="overflow-x:auto;">
+                    <div id="colorid-qc-summary"></div>
+                </div>
+                <div id="colorid-qc-swaps" style="display:none;"></div>
+                <details style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px 10px;">
+                    <summary style="font-size: 0.72rem; color: var(--text-secondary); cursor: pointer; user-select: none;">
+                        <i data-lucide="help-circle" style="width: 12px; height: 12px; display: inline;"></i> ID信頼度・Swap検知について
+                    </summary>
+                    <div style="font-size: 0.7rem; color: var(--text-muted); line-height: 1.6; padding-top: 8px;">
+                        <strong>平均ID信頼度</strong>: 各個体の尾部カラー判定における「採用色の得票率」の平均。1.0 に近いほど色が一貫しており個体識別が確実です。<br>
+                        <strong>低信頼フレーム</strong>: 採用色の得票率が閾値未満のフレーム。多い場合は別個体との取り違えや色サンプリング不良の疑いがあります。<br>
+                        <strong>Identity Swap 検知</strong>: 同一トラックの安定色が途中で切り替わった（＝個体取り違えの可能性が高い）時点。自動でトラックを分割していますが、該当フレーム付近のID割り当てを手動確認することを推奨します。
+                    </div>
+                </details>
             </div>
         </div>
     </div>

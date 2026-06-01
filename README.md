@@ -181,7 +181,8 @@ mouse-scratch-dashboard/
 │
 ├── requirements.txt        # pip 用依存定義
 ├── environment.yml         # Conda + CUDA 環境定義
-├── setup.bat / start.bat   # Windows 環境向け起動スクリプト
+├── setup.bat / start.bat   # Windows 環境向け起動スクリプト（start.bat は環境を自動判別・自動構築）
+├── check_env.py            # 依存パッケージの検査と不足分の自動インストール（GPU は cu128）
 ├── setup_models.py         # 事前学習モデル自動取得（Zenodo 等）
 │
 ├── models/                 # 姿勢推定モデル配置先（.slp / .pt）
@@ -192,7 +193,23 @@ mouse-scratch-dashboard/
 
 ## 🚀 セットアップと起動手順
 
-### A. ローカル（GPU 推奨）
+### A-0. かんたん起動（`start.bat` — 環境を自動構築）
+
+Windows では **`start.bat` をダブルクリックするだけ**で、以下が自動実行される（手動セットアップ不要）。
+
+1. **環境の自動判別**：`conda` があれば conda 環境 `mouse-scratch`、無ければプロジェクト直下の `.venv` を使用。環境が無ければ自動作成する。
+2. **依存の自動インストール**：`check_env.py` が不足パッケージを検査して導入する。
+   GPU（`nvidia-smi` 検出時）は PyTorch を **cu128** ホイールで入れる（RTX 5080 / sm_120 対応）。DeepLabCut も含め不足分は自動導入。初回は数 GB のダウンロードが発生する。
+3. **サーバー起動**：`app_server.py` を起動し、ブラウザで `http://127.0.0.1:8000` を自動で開く。
+
+> 依存の検査・導入だけを単体で行いたい場合：
+> ```bat
+> python check_env.py            :: 不足分を自動インストール
+> python check_env.py --no-install :: 検査・報告のみ（導入しない）
+> python check_env.py --skip-dlc   :: DeepLabCut をスキップして軽量導入
+> ```
+
+### A. ローカル（GPU 推奨・手動セットアップ）
 
 ```bash
 # 1. リポジトリ取得
@@ -216,6 +233,42 @@ pip install 'deeplabcut[modelzoo,pytorch]>=3.0.0'
 python app_server.py
 # → http://127.0.0.1:8000 でダッシュボードが開く
 ```
+
+### A-2. Anaconda Prompt から手動起動（`start.bat` を使わない場合）
+
+`start.bat` をダブルクリックする代わりに、**Anaconda Prompt** を開いて手動でサーバー／パイプラインを起動する手順。
+スタートメニュー →「Anaconda Prompt」を開き、以下を順に実行する。
+
+```bat
+:: 1. プロジェクトフォルダへ移動（/d はドライブをまたぐ場合に必要）
+cd /d "C:\path\to\mouse-scratch-dashboard"
+
+:: 2. 仮想環境を有効化
+::   2-a. このマシンの動作環境（RTX 5080 対応・PyTorch cu128 入り venv）【推奨】
+.venv\Scripts\activate
+::   2-b. もしくは conda 環境を使う場合
+::   conda activate mouse-scratch
+
+:: 3. 文字コードを UTF-8 に固定（Windows の既定 cp932 だと日本語ログで
+::    UnicodeEncodeError が起き、解析が Mock に誤フォールバックすることがある）
+set PYTHONUTF8=1
+
+:: 3.5 依存パッケージを検査し、不足があれば自動インストール（任意・初回推奨）
+python check_env.py
+
+:: 4-a. ダッシュボード（FastAPI サーバー）を起動
+python app_server.py
+::    → ブラウザで http://127.0.0.1:8000 を開く（停止は Ctrl+C）
+
+:: 4-b. もしくは解析パイプラインを CLI 実行（GPU・DLC の例）
+python pipeline.py --video "C:\path\to\videos\cage_01.mov" ^
+    --engine dlc --dlc-superanimal superanimal_topviewmouse ^
+    --mice-count 4 --px-to-mm 0.38 --device cuda --out_dir outputs
+```
+
+> **環境に関する注意（重要）**
+> - 本マシンで GPU 推論が実際に動作するのは **プロジェクト直下の `.venv`**（Python 3.10 / `torch 2.11.0+cu128`）です。RTX 5080（Blackwell / sm_120）は CUDA 12.8 以降のビルドが必要なため、`environment.yml` の `pytorch-cuda=12.1` で作る conda 環境 `mouse-scratch` では GPU カーネルが無く動作しません。
+> - GPU を使う場合は上記 **2-a の `.venv`** を有効化してください。`start.bat` は conda 環境を前提にしているため、GPU 解析を行う本環境では本節の手動起動を推奨します。
 
 ### B. Google Colab
 
@@ -282,6 +335,7 @@ python pipeline.py \
 - `cage_01_frame_labels.csv`：フレーム単位の全特徴量＋ scratch_flag / scratch_prob
 - `cage_01_bouts.csv`：Bout 単位の集計
 - `cage_01_summary.csv`：個体別観察時間正規化統計
+- `cage_01_columns.csv`：上記 CSV の列定義（単位・意味・算出式のデータ辞書）
 
 ### GUI から実行
 
@@ -325,6 +379,8 @@ is_mock
 
 ### `*_bouts.csv`
 
+検出された個々のスクラッチ bout（連続したひっかき動作のまとまり）の明細。
+
 ```
 mouse_id, bout_id, bout_start_frame, bout_end_frame,
 bout_start_time_s, bout_end_time_s, bout_duration_s,
@@ -333,7 +389,27 @@ bout_n_frames, fps_used
 
 ### `*_summary.csv`
 
-§ スクラッチ判定アルゴリズム / 7 を参照。
+個体ごとに観察時間で正規化した集計値。主要列の意味（§ スクラッチ判定アルゴリズム / 7 も参照）：
+
+| 列名 | 単位 | 意味 | 算出式 |
+|---|---|---|---|
+| `n_bouts` | 回 | ひっかきエピソードの検出回数（bout 数） | その個体の bout 件数 |
+| `total_scratch_duration_s` | 秒 | 実際にひっかいていた総時間 | Σ `bout_duration_s` |
+| `scratch_rate_bouts_per_min` | 回/分 | **ひっかき頻度**（個体間比較に推奨） | `n_bouts` ÷ 観察時間(分) |
+| `scratch_rate_s_per_min` | 秒/分 | **ひっかき強度**（個体間比較に推奨） | `total_scratch_duration_s` ÷ 観察時間(分) |
+| `mean_bout_duration_s` | 秒 | 1 回の bout の平均持続時間 | `mean(bout_duration_s)` |
+| `sem_bout_duration_s` | 秒 | bout 持続時間の標準誤差 | `std / sqrt(n_bouts)` |
+| `median_bout_duration_s` | 秒 | bout 持続時間の中央値 | `median(bout_duration_s)` |
+| `longest_bout_s` | 秒 | 最長 bout の持続時間 | `max(bout_duration_s)` |
+
+### `*_columns.csv`（データ辞書 / 列定義）
+
+解析実行ごとに自動出力される**サイドカー CSV**。`*_summary.csv` と `*_bouts.csv` の全列について
+**列名・単位・意味・算出式**を日本語で記載する（UTF-8 BOM 付きで Excel 文字化けなし）。
+
+- データ本体 CSV のスキーマは機械可読性を保つため変更せず、説明は本サイドカーに分離する設計。
+- 定義の実体は `pipeline.py` の `COLUMN_DEFINITIONS` / `write_column_definitions()`。
+  特徴量・判定ロジックを変更した際は、本辞書も `feature_extraction.py` と厳密に一致させて同時更新すること。
 
 ### GUI からの `corrected_tracks_<日付>.csv`
 

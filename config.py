@@ -73,6 +73,40 @@ ACTIVE_MOUSE_IDS: list = (
     if ACTIVE_MOUSE_IDS_STR else []
 )
 
+# ── 個体識別: 色 + 帯本数 (color + band count) ────────────────────────────────
+# 尾に塗った「色」だけでなく「帯の本数」も併用して個体を区別する方式。
+# 例: 赤1本/赤2本/青1本/青2本 の 4 通りで 4 個体を一意に識別する。
+# 純粋な色相のみ (MOUSE_COLORS) では「赤1本」と「赤2本」を区別できないため拡張する。
+#
+# 対応表: (色名, 帯本数) → mouse_id。色名は MOUSE_COLORS の "name" と一致させること。
+# 帯本数は {1, 2} にクランプして評価する（3 本以上は 2 として扱う）。
+MOUSE_ID_BY_COLOR_COUNT = {
+    ("red",  1): 1,   # 赤1本
+    ("red",  2): 2,   # 赤2本
+    ("blue", 1): 3,   # 青1本
+    ("blue", 2): 4,   # 青2本
+}
+# 帯本数判定に使用する色（MOUSE_COLORS のキー）。ここに無い色は本数判定の対象外。
+BAND_COUNT_COLOR_IDS = [1, 2]  # 1=red, 2=blue
+
+# ── 尾チェーン (tail chain) — 帯カウント用の尾部折れ線 ────────────────────────
+# スクラッチ判定用の 11 点スケルトンとは別系統で、尾に沿った順序付きキーポイント列を保持する。
+# DLC SuperAnimal-TopViewMouse は tail_base〜tail_end の複数尾ノードを出力するため、
+# それらを base→end の順に並べた折れ線として帯サンプリングに用いる。
+# pose_engine 側では「名前が 'tail' で始まる bodypart」を末尾番号順に保持する（命名差に頑健）。
+# feature_extraction は KEYPOINTS(11点) のみ参照するため、本チェーンは特徴量に非干渉。
+TAIL_CHAIN_KEYPOINTS = ["tail_base", "tail1", "tail2", "tail3", "tail_end"]
+
+# ── 帯カウントの幾何パラメータ (px) ──────────────────────────────────────────
+# 実測校正: 提示動画 300.mov (1920x1080) の赤/青マーカー連結成分を 40 フレームで計測。
+#   赤帯: 尾方向長さ 中央値 27px / 尾を横切る幅 中央値 18px
+#   青帯: 尾方向長さ 中央値 15px (p25=12px) / 幅 中央値 11px
+# 解像度依存のため、撮影解像度が変わった場合は再計測すること（mm 換算は本カウントには不要）。
+TAIL_SAMPLE_STEP_PX   = _get_env("TAIL_SAMPLE_STEP_PX",   4)   # 尾折れ線に沿った標本化間隔
+TAIL_SAMPLE_RADIUS_PX = _get_env("TAIL_SAMPLE_RADIUS_PX", 7)   # 各標本点の円形パッチ半径（細い青帯にも収まる）
+BAND_MIN_LEN_PX       = _get_env("BAND_MIN_LEN_PX",       6)   # 1 帯とみなす最小の尾方向連続長（最小実帯~12px の約半分→ノイズ除去）
+BAND_MIN_GAP_PX       = _get_env("BAND_MIN_GAP_PX",       10)  # 2 帯を分離する皮膚ギャップの最小長（市松/途切れは結合し過分割を防ぐ）
+
 # ── SLEAP confidence thresholds ──────────────────────────────────────────────
 MIN_CONFIDENCE          = _get_env("MIN_CONFIDENCE", 0.40)  # general keypoints
 HIND_PAW_MIN_CONF       = _get_env("HIND_PAW_MIN_CONF", 0.35)  # hind paws can be partially occluded — relax slightly

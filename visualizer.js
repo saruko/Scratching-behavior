@@ -21,6 +21,15 @@ class CageVisualizer {
         this.hoverTarget = null; // { mouseId, kpName }
         this.onNodeDrag = null; // Callback: (mouseId, kpName, x, y)
         this.onNodeDragEnd = null; // Callback: ()
+
+        // ── A-2 キャリブレーション計測モード ───────────────────────────────
+        // measureMode が true の間はキーポイントのドラッグを無効化し、
+        // クリックで既知長の2点を打つ。座標は canvas 内部座標系（= 動画ピクセル空間、
+        // resizeCanvasToVideo により canvas.width/height = 動画ネイティブ解像度）で取得するため、
+        // 2点間のピクセル距離は動画上の真のピクセル距離に一致する。
+        this.measureMode = false;
+        this.measurePoints = [];           // [{x, y}, ...] 最大2点（動画ピクセル座標）
+        this.onMeasureUpdate = null;       // Callback: (points[]) 点が追加/リセットされるたびに呼ぶ
         
         // Animation timing trackers (B-9)
         this.animTime = 0;
@@ -59,6 +68,13 @@ class CageVisualizer {
         this.currentFrameData = null;
         this.selectedMouseId = null;
 
+        // ── B-2 キーポイント信頼度カラー表示 ───────────────────────────────
+        // 各キーポイントの推定信頼度（conf, 0..1）をリング色で可視化する。
+        // 学術判定では config.py の MIN_CONFIDENCE 未満の点は補間前にマスクされるため、
+        // 描画される点は閾値以上だが、閾値近傍（低信頼）の点を研究者が一目で識別できるようにする。
+        // conf が null（エンジンが信頼度を出力しない／取得不能）の場合はリングを描かない。
+        this.showConfidence = true;
+
         // ── フェーズ1 初期化確認モード ─────────────────────────────────────
         // 'bbox': バウンディングボックスのみ強調（骨格はうっすら）
         // 'pose': 骨格を強調（bbox はうっすら）
@@ -81,6 +97,42 @@ class CageVisualizer {
         this.confirmationMode = mode;
         this.previewFrames = previewFrames;
         this.previewSampledFrames = sampledFrames;
+    }
+
+    /**
+     * A-2 キャリブレーション計測モードの ON/OFF。
+     * ON にするとキーポイントドラッグは無効化され、クリックで2点を打てる。
+     * OFF にすると計測点はクリアされる。
+     */
+    setMeasureMode(on) {
+        this.measureMode = !!on;
+        this.measurePoints = [];
+        this.canvas.style.cursor = on ? 'crosshair' : 'default';
+        if (this.onMeasureUpdate) this.onMeasureUpdate(this.measurePoints);
+        this._redraw();
+    }
+
+    /** 現在の計測点をクリアして再計測できるようにする。 */
+    clearMeasurePoints() {
+        this.measurePoints = [];
+        if (this.onMeasureUpdate) this.onMeasureUpdate(this.measurePoints);
+        this._redraw();
+    }
+
+    /** 2点間のピクセル距離を返す（2点未満なら null）。 */
+    getMeasuredPixelDistance() {
+        if (this.measurePoints.length < 2) return null;
+        const [a, b] = this.measurePoints;
+        return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
+    }
+
+    /**
+     * 計測オーバーレイのみを再描画する軽量ヘルパー。
+     * 再生停止中（render ループが回っていない）でもクリックに即応するために使用する。
+     * 直近に draw() に渡された currentFrameData をそのまま使って全体を描き直す。
+     */
+    _redraw() {
+        this.draw(this.currentFrameData, this.selectedMouseId);
     }
 
     /**
@@ -128,9 +180,23 @@ class CageVisualizer {
      */
     initMouseEvents() {
         this.canvas.addEventListener('mousedown', (e) => {
+            // ── A-2 計測モード: クリックで既知長の2点を取得（ドラッグ処理より優先） ──
+            if (this.measureMode) {
+                const mpos = this.getMousePos(e);
+                if (this.measurePoints.length >= 2) {
+                    // 既に2点ある場合は新しい計測を開始する
+                    this.measurePoints = [];
+                }
+                this.measurePoints.push({ x: mpos.x, y: mpos.y });
+                if (this.onMeasureUpdate) this.onMeasureUpdate(this.measurePoints);
+                this._redraw();
+                e.preventDefault();
+                return;
+            }
+
             if (!this.currentFrameData) return;
             const pos = this.getMousePos(e);
-            
+
             // Look for closest node to the click location
             const target = this.findClosestNode(pos.x, pos.y);
             if (target && target.dist < 12) { // 12px active radius
@@ -241,6 +307,21 @@ class CageVisualizer {
         return closest;
     }
 
+    /**
+     * B-2: キーポイント信頼度（0..1）を3段階のリング色に変換する。
+     * 閾値は config.py の MIN_CONFIDENCE(0.40) を学術的基準に合わせて設定。
+     *   高(≥0.70): 緑 — 信頼できる推定
+     *   中(0.50–0.70): 琥珀 — 注意
+     *   低(<0.50): 赤 — マスク閾値近傍、位置が不確実
+     * conf が null（信頼度データなし）の場合は null を返しリングを描かない。
+     */
+    _confidenceRingColor(conf) {
+        if (conf == null || isNaN(conf)) return null;
+        if (conf >= 0.70) return "#22C55E";
+        if (conf >= 0.50) return "#EAB308";
+        return "#EF4444";
+    }
+
     draw(frameData, selectedMouseId = null, timestamp = null) {
         this.currentFrameData = frameData;
         this.selectedMouseId = selectedMouseId;
@@ -256,7 +337,14 @@ class CageVisualizer {
             this.lastTimestamp = null;
         }
 
-        if (!frameData) return;
+        if (!frameData) {
+            // 計測モード時は frameData が無くてもオーバーレイだけは描く
+            if (this.measureMode) {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                this._drawMeasureOverlay();
+            }
+            return;
+        }
 
         const ctx = this.ctx;
         const w = this.canvas.width;
@@ -317,6 +405,78 @@ class CageVisualizer {
                 this.drawMouse(mouseData, mId, isSelected, isScratching, colorHex);
             }
         }
+
+        // ── A-2 キャリブレーション計測オーバーレイ（最前面に描画） ──
+        if (this.measureMode) {
+            this._drawMeasureOverlay();
+        }
+    }
+
+    /**
+     * 計測モードのオーバーレイ描画。
+     * 打たれた点（最大2点）を十字マーカーで、2点揃ったら結ぶ線とピクセル距離を表示する。
+     * 座標は canvas 内部座標系（= 動画ピクセル空間）でそのまま描画する。
+     */
+    _drawMeasureOverlay() {
+        const ctx = this.ctx;
+        const pts = this.measurePoints;
+        if (!pts || pts.length === 0) return;
+
+        ctx.save();
+        const accent = '#22D3EE'; // シアン: 既存のマウス色と被りにくい計測専用色
+
+        // 2点を結ぶ線
+        if (pts.length >= 2) {
+            ctx.strokeStyle = accent;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 5]);
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            ctx.lineTo(pts[1].x, pts[1].y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // 各点の十字マーカー
+        pts.forEach((p, i) => {
+            ctx.strokeStyle = accent;
+            ctx.fillStyle = accent;
+            ctx.lineWidth = 2;
+            const r = 9;
+            ctx.beginPath();
+            ctx.moveTo(p.x - r, p.y);
+            ctx.lineTo(p.x + r, p.y);
+            ctx.moveTo(p.x, p.y - r);
+            ctx.lineTo(p.x, p.y + r);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+            // 点番号ラベル
+            ctx.font = 'bold 12px Outfit, sans-serif';
+            ctx.fillStyle = '#000';
+            ctx.fillRect(p.x + 8, p.y - 18, 16, 14);
+            ctx.fillStyle = accent;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(i + 1), p.x + 12, p.y - 10);
+        });
+
+        // 距離ラベル（線の中点に表示）
+        const dist = this.getMeasuredPixelDistance();
+        if (dist != null) {
+            const mx = (pts[0].x + pts[1].x) / 2;
+            const my = (pts[0].y + pts[1].y) / 2;
+            const label = `${dist.toFixed(1)} px`;
+            ctx.font = 'bold 13px Outfit, sans-serif';
+            const tw = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.78)';
+            ctx.fillRect(mx - tw / 2 - 6, my - 22, tw + 12, 20);
+            ctx.fillStyle = accent;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, mx - tw / 2, my - 12);
+        }
+
+        ctx.restore();
     }
 
     /**
@@ -343,30 +503,43 @@ class CageVisualizer {
 
             // track → assigned mouse_id を appState 経由で取得（外部状態を参照）
             // window.appState がない場合は det.mouse_id（カラーID自動推定値）を使用
+            // mouse_id=0 は「誤検出（除外）」を表す特別値（解析対象外）。
             let assignedId = det.mouse_id;
+            let excluded = false;
             if (typeof window !== 'undefined' && window.appState && window.appState.confirmedMapping) {
-                const mapped = window.appState.confirmedMapping[det.track];
-                if (mapped) assignedId = mapped;
+                const cm = window.appState.confirmedMapping;
+                if (Object.prototype.hasOwnProperty.call(cm, det.track)) {
+                    const mapped = cm[det.track];
+                    if (mapped === 0) { excluded = true; assignedId = null; }
+                    else if (mapped) { assignedId = mapped; }
+                }
             }
 
-            const colorEntry = (assignedId != null && this.mouseColors[assignedId])
-                ? this.mouseColors[assignedId]
-                : { hex: '#FFFFFF', name: '未割当' };
+            const colorEntry = excluded
+                ? { hex: '#9CA3AF', name: '誤検出' }
+                : (assignedId != null && this.mouseColors[assignedId])
+                    ? this.mouseColors[assignedId]
+                    : { hex: '#FFFFFF', name: '未割当' };
 
             ctx.save();
             ctx.strokeStyle = colorEntry.hex;
             ctx.lineWidth = isBboxMode ? 4 : 2;
-            if (!isBboxMode) {
+            // 誤検出は破線で控えめに表示（除外対象であることを視覚的に示す）
+            if (!isBboxMode || excluded) {
                 ctx.setLineDash([6, 4]);
             }
+            if (excluded) ctx.globalAlpha = 0.55;
             ctx.strokeRect(x1, y1, w, h);
+            ctx.globalAlpha = 1.0;
 
             // ID ラベル（左上に配置）
             const fontSize = isBboxMode ? 18 : 12;
             ctx.font = `bold ${fontSize}px Outfit, sans-serif`;
-            const label = assignedId != null
-                ? `Mouse ${assignedId} (${colorEntry.name})`
-                : `${det.track} → ID未割当`;
+            const label = excluded
+                ? `🚫 誤検出（除外）`
+                : (assignedId != null
+                    ? `Mouse ${assignedId} (${colorEntry.name})`
+                    : `${det.track} → ID未割当`);
             const tw = ctx.measureText(label).width;
             const padX = 8, padY = 5;
             const labelW = tw + padX * 2;
@@ -528,6 +701,21 @@ class CageVisualizer {
             ctx.lineWidth = lineWidth;
             ctx.fill();
             ctx.stroke();
+
+            // ── B-2 信頼度リング: ノード外周に conf 段階色のリングを重畳描画 ──
+            // ドラッグ/ホバー中はシアンの強調表示が優先されるためリングを省略する。
+            if (this.showConfidence && !isDragged && !isHovered) {
+                const ringColor = this._confidenceRingColor(kp.conf);
+                if (ringColor) {
+                    ctx.beginPath();
+                    ctx.arc(kp.x, kp.y, size + 3, 0, Math.PI * 2);
+                    ctx.strokeStyle = ringColor;
+                    ctx.lineWidth = 2;
+                    ctx.globalAlpha = isSelected ? 0.95 : 0.6;
+                    ctx.stroke();
+                    ctx.globalAlpha = 1.0;
+                }
+            }
 
             // Glow overlay around dragging node
             if (isDragged) {

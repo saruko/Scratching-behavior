@@ -12,21 +12,15 @@ import json
 import subprocess
 import asyncio
 import threading
+from contextlib import asynccontextmanager
 from typing import Dict, Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-app = FastAPI(
-    title="Mouse Scratch Analyzer API",
-    description="FastAPI backend to run the behavior detection pipeline and serve dashboard files."
-)
 
-# サーバー起動完了時に、ダッシュボードのアクセス先 URL を見やすく表示する。
-# uvicorn の "Application startup complete." 直前に呼び出されるため、ユーザーが
-# 最初に目にする情報として最適。
-@app.on_event("startup")
-async def _print_dashboard_url_banner():
+def _print_dashboard_url_banner():
+    """サーバー起動完了時に、ダッシュボードのアクセス先 URL を見やすく表示する。"""
     # 環境変数 SERVER_PORT があれば使用、なければ 8000
     _port = os.environ.get("SERVER_PORT", "8000")
     _url_local   = f"http://127.0.0.1:{_port}"
@@ -42,6 +36,22 @@ async def _print_dashboard_url_banner():
         "==========================================================\n"
     )
     print(_banner, flush=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 起動時: uvicorn の "Application startup complete." 直前に呼び出されるため、
+    # ユーザーが最初に目にする情報として URL バナーを表示する。
+    _print_dashboard_url_banner()
+    yield
+    # 終了時の後始末が必要になった場合はここに記述する。
+
+
+app = FastAPI(
+    title="Mouse Scratch Analyzer API",
+    description="FastAPI backend to run the behavior detection pipeline and serve dashboard files.",
+    lifespan=lifespan,
+)
 
 # --- Task DB Persistence Helper [B-4] ---
 TASKS_DB_FILE = "tasks_db.json"
@@ -90,6 +100,8 @@ class AnalysisRequest(BaseModel):
     dlc_superanimal: Optional[str] = "superanimal_topviewmouse"  # or "superanimal_quadruped"
     dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
     dlc_pose_model: Optional[str] = "hrnet_w32"
+    # DLC multi-animal 推論の最大個体数 (0 = mice_count を流用, それも 0 なら 4)
+    dlc_max_individuals: int = 0
 
     # ── フェーズ1 初期化確認モード ─────────────────────────────────────────
     # preview_only=True の場合、動画冒頭のみ解析して _preview.json を出力する。
@@ -97,6 +109,12 @@ class AnalysisRequest(BaseModel):
     preview_only: bool = False
     preview_duration_s: float = 300.0  # 5分 = 300秒
     confirmed_mapping: Optional[str] = None  # JSON文字列: {"track_0": 1, ...}
+
+    # ── Layer 1: ケージマスク（装置領域除外） ──────────────────────────────────
+    # cage_mask_path: outputs/<videoname>_cage_mask.json への相対/絶対パス。
+    # 指定された場合、pipeline.py に --cage-mask 引数として渡され、
+    # 多角形内の bbox 中心を持つ検出が解析から除外される。
+    cage_mask_path: Optional[str] = None
 
     model_config = {
         "protected_namespaces": ()
@@ -134,6 +152,21 @@ class CorrectionsRequest(BaseModel):
     csv_path: str       # outputs/ 配下の既存 CSV のパス（相対または絶対）
     csv_content: str    # クライアントが生成した補正済み CSV テキスト全体
 
+
+class CageMaskRequest(BaseModel):
+    """
+    ケージ装置を除外するための多角形マスクデータ。
+    GUI 上で研究者が「給水器」「餌器」「配管」などの装置領域を
+    多角形で囲んで保存することで、DLC 等の誤検出を post-detection 段階で除外する。
+
+    座標は動画ピクセル空間 (origin=左上)。複数の独立した多角形を許容する
+    （例: 給水器と餌器が離れている場合）。
+    """
+    video: str                                 # 動画ファイル名 (basename)
+    video_width: int                           # 動画幅 (px) — 整合性チェック用
+    video_height: int                          # 動画高 (px) — 整合性チェック用
+    exclude_polygons: list[list[list[float]]]  # [[ [x,y], ... ], [ [x,y], ... ], ...]
+
 # --- 1. Dashboard Static Files & Direct Routing ---
 
 @app.get("/")
@@ -145,12 +178,17 @@ async def get_index():
 
 # NOTE: FastAPIはルートを登録順に評価するため、
 # より具体的なパス (/outputs/{filename}) を先に定義しておく必要がある。
+def _output_media_type(filename: str) -> str:
+    """拡張子に応じた MIME タイプを返す（manifest JSON 等を正しく配信するため）。"""
+    return "application/json" if filename.lower().endswith(".json") else "text/csv"
+
+
 @app.get("/outputs/{filename}")
 async def get_output_file(filename: str):
-    """解析完了後に出力されたCSVなどの結果ファイルを配信します。"""
+    """解析完了後に出力されたCSV・manifest JSON などの結果ファイルを配信します。"""
     path = os.path.join("outputs", filename)
     if os.path.exists(path):
-        return FileResponse(path, media_type="text/csv")
+        return FileResponse(path, media_type=_output_media_type(filename))
     raise HTTPException(status_code=404, detail=f"出力ファイルが見つかりません: {filename}")
 
 @app.get("/outputs/{subdir}/{filename}")
@@ -160,7 +198,7 @@ async def get_output_subdir_file(subdir: str, filename: str):
         raise HTTPException(status_code=400, detail="不正なパスが検出されました。")
     path = os.path.join("outputs", subdir, filename)
     if os.path.exists(path):
-        return FileResponse(path, media_type="text/csv")
+        return FileResponse(path, media_type=_output_media_type(filename))
     raise HTTPException(status_code=404, detail=f"出力ファイルが見つかりません: {subdir}/{filename}")
 
 @app.get("/api/config")
@@ -232,7 +270,10 @@ async def save_corrections(req: CorrectionsRequest):
     try:
         # バックアップを作成（既存ファイルがある場合）
         if os.path.exists(save_path):
-            backup_path = save_path.replace(".csv", "_backup.csv")
+            # str.replace は ".csv" を全箇所置換するため (例: data.csv.csv 等で誤動作)
+            # 拡張子のみを安全に扱う os.path.splitext を使用する
+            _root, _ext = os.path.splitext(save_path)
+            backup_path = f"{_root}_backup{_ext}"
             with open(save_path, "r", encoding="utf-8") as f:
                 with open(backup_path, "w", encoding="utf-8") as bf:
                     bf.write(f.read())
@@ -248,6 +289,80 @@ async def save_corrections(req: CorrectionsRequest):
         })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CSV保存中にエラーが発生しました: {e}")
+
+
+# --- Layer 1: ケージマスク API ───────────────────────────────────────────────
+
+def _cage_mask_path_for(video_name: str) -> str:
+    """動画名から outputs/<basename>_cage_mask.json への安全なパスを構築する。"""
+    # パストラバーサル防止: basename のみ採用し、拡張子を除いた名前を使用
+    safe_name = os.path.basename(video_name)
+    stem = os.path.splitext(safe_name)[0]
+    return os.path.join("outputs", f"{stem}_cage_mask.json")
+
+
+@app.post("/api/cage_mask")
+async def save_cage_mask(req: CageMaskRequest):
+    """
+    ケージ装置の除外多角形マスクを outputs/<videoname>_cage_mask.json に保存する。
+    既存ファイルは上書き、空のポリゴンリストが渡された場合はマスクを削除する。
+    """
+    if not req.video:
+        raise HTTPException(status_code=400, detail="video フィールドが空です。")
+
+    # 動画名の安全化
+    save_path = _cage_mask_path_for(req.video)
+    os.makedirs("outputs", exist_ok=True)
+
+    # 空のマスクが渡された場合は既存ファイルを削除（マスク無効化）
+    if len(req.exclude_polygons) == 0:
+        if os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+                return JSONResponse({"status": "deleted", "path": save_path})
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"マスク削除中にエラー: {e}")
+        return JSONResponse({"status": "no_op", "path": save_path})
+
+    # 各多角形を最低 3 点に検証 (3 点未満は閉領域を形成しないため)
+    for i, poly in enumerate(req.exclude_polygons):
+        if len(poly) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail=f"多角形 #{i} の頂点数が不足しています ({len(poly)} < 3)。"
+            )
+
+    import datetime
+    data = {
+        "video": os.path.basename(req.video),
+        "video_width": req.video_width,
+        "video_height": req.video_height,
+        "exclude_polygons": req.exclude_polygons,
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return JSONResponse({
+            "status": "saved",
+            "path": save_path,
+            "polygon_count": len(req.exclude_polygons),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"マスク保存中にエラー: {e}")
+
+
+@app.get("/api/cage_mask/{video_name}")
+async def get_cage_mask(video_name: str):
+    """指定動画のケージマスクを返す。存在しない場合は 404。"""
+    mask_path = _cage_mask_path_for(video_name)
+    if not os.path.exists(mask_path):
+        raise HTTPException(status_code=404, detail=f"マスクが見つかりません: {video_name}")
+    try:
+        with open(mask_path, "r", encoding="utf-8") as f:
+            return JSONResponse(json.load(f))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"マスク読込中にエラー: {e}")
 
 
 @app.get("/api/results")
@@ -323,9 +438,22 @@ async def run_evaluation(req: EvaluateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"評価処理中にエラーが発生しました: {e}")
 
+    # NaN は標準 JSON では非対応のため None に変換してからレコード化する
+    # （precision/recall 等は分母0で NaN になり得る）
+    import math
+    def _records(df):
+        if df is None or df.empty:
+            return []
+        recs = df.to_dict(orient="records")
+        for rec in recs:
+            for k, v in rec.items():
+                if isinstance(v, float) and math.isnan(v):
+                    rec[k] = None
+        return recs
+
     return {
-        "frame_metrics": result["frame_metrics"].to_dict(orient="records") if not result["frame_metrics"].empty else [],
-        "bout_metrics":  result["bout_metrics"].to_dict(orient="records")  if result["bout_metrics"] is not None and not result["bout_metrics"].empty else [],
+        "frame_metrics": _records(result["frame_metrics"]),
+        "bout_metrics":  _records(result["bout_metrics"]),
         "output_files":  result["output_files"],
     }
 
@@ -386,12 +514,25 @@ def run_pipeline_task(task_id: str, req: AnalysisRequest):
             cmd.extend(["--dlc-detector", req.dlc_detector])
         if req.dlc_pose_model:
             cmd.extend(["--dlc-pose-model", req.dlc_pose_model])
+        if req.dlc_max_individuals and req.dlc_max_individuals > 0:
+            cmd.extend(["--dlc-max-individuals", str(req.dlc_max_individuals)])
 
     # ── フェーズ1 初期化確認モード引数 ──────────────────────────────────────
     if req.preview_only:
         cmd.extend(["--preview-only", "--preview-duration", str(req.preview_duration_s)])
     if req.confirmed_mapping:
         cmd.extend(["--confirmed-mapping", req.confirmed_mapping])
+
+    # ── Layer 1: ケージマスク引数 ───────────────────────────────────────────
+    # フロントエンドから明示指定 or outputs/ に <videoname>_cage_mask.json が存在
+    # する場合に自動的にパイプラインへ伝達する。
+    if req.cage_mask_path and os.path.exists(req.cage_mask_path):
+        cmd.extend(["--cage-mask", req.cage_mask_path])
+    else:
+        auto_mask_path = _cage_mask_path_for(req.video_path)
+        if os.path.exists(auto_mask_path):
+            cmd.extend(["--cage-mask", auto_mask_path])
+            TASKS_DB[task_id]["log"] += f"[Server] [Auto-Mask] 既存マスクを検出: {auto_mask_path}\n"
 
     TASKS_DB[task_id]["log"] += f"[Server] 解析プロセスを開始します...\n[Server] コマンド: {' '.join(cmd)}\n\n"
     TASKS_DB[task_id]["log"] += "[Progress: 5%]\n"
@@ -548,6 +689,12 @@ async def get_task_status(task_id: str):
                     "frame_labels_url": frame_csv,
                     "bouts_url": bouts_csv
                 }
+                # [A-4] プロベナンス manifest が存在すれば URL を併せて返す
+                if os.path.exists(os.path.join("outputs", f"{video_basename}_manifest.json")):
+                    result_files["manifest_url"] = f"/outputs/{video_basename}_manifest.json"
+                summary_path = os.path.join("outputs", f"{video_basename}_summary.csv")
+                if os.path.exists(summary_path):
+                    result_files["summary_url"] = f"/outputs/{video_basename}_summary.csv"
             
     return {
         "task_id": task_id,
@@ -597,6 +744,7 @@ class ConfirmIdsRequest(BaseModel):
     dlc_superanimal: Optional[str] = "superanimal_topviewmouse"
     dlc_detector: Optional[str] = "fasterrcnn_resnet50_fpn_v2"
     dlc_pose_model: Optional[str] = "hrnet_w32"
+    dlc_max_individuals: int = 0
     # 研究者確認済みのマッピング: {"track_0": 1, "track_1": 2, ...}
     confirmed_mapping: dict
 
@@ -640,6 +788,7 @@ async def confirm_ids_and_analyze(req: ConfirmIdsRequest, background_tasks: Back
         dlc_superanimal=req.dlc_superanimal,
         dlc_detector=req.dlc_detector,
         dlc_pose_model=req.dlc_pose_model,
+        dlc_max_individuals=req.dlc_max_individuals,
         confirmed_mapping=json.dumps(req.confirmed_mapping, ensure_ascii=False),
     )
 

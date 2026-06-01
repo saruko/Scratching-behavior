@@ -24,7 +24,13 @@ import numpy as np
 import pandas as pd
 from collections import Counter, defaultdict
 from typing import Dict, Optional
-from config import MOUSE_COLORS, RED_WRAP_LOWER, RED_WRAP_UPPER, MAX_MICE_LIMIT, ACTIVE_MOUSE_IDS
+import re
+from config import (
+    MOUSE_COLORS, RED_WRAP_LOWER, RED_WRAP_UPPER, MAX_MICE_LIMIT, ACTIVE_MOUSE_IDS,
+    # ── 色 + 帯本数 による個体識別 (color + band count) ──
+    MOUSE_ID_BY_COLOR_COUNT, BAND_COUNT_COLOR_IDS,
+    TAIL_SAMPLE_STEP_PX, TAIL_SAMPLE_RADIUS_PX, BAND_MIN_LEN_PX, BAND_MIN_GAP_PX,
+)
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 SAMPLE_RADIUS    = 12   # px — circle radius around tail_base keypoint
@@ -108,6 +114,181 @@ def classify_tail_color(frame: np.ndarray,
         threshold = WHITE_MIN_MATCH_PX if mouse_id == 5 else MIN_MATCH_PX
         if hit_count > best_count and hit_count >= threshold:
             best_count, best_id = hit_count, mouse_id
+
+    return best_id
+
+
+# ── 色 + 帯本数 (color + band count) による個体識別 ───────────────────────────
+# 尾に塗った「色」だけでなく「帯の本数」(赤1本/赤2本/青1本/青2本) も併用して
+# 4 個体を一意に識別する。単点 HSV 分類 (classify_tail_color) では本数を区別できないため、
+# DLC SuperAnimal-TopViewMouse が出力する尾チェーン (tail_base→tail_end) の折れ線に沿って
+# 色を細かく標本化し、ランレングス符号化で帯の本数を数える方式を用いる。
+#
+# 注意: 本関数が返す mouse_id は MOUSE_ID_BY_COLOR_COUNT に基づく「色+本数」ID 空間 (1–4) で
+#       あり、classify_tail_color が返す「色のみ」ID 空間 (1=赤, 2=青, …) とは意味が異なる。
+#       両者を同一動画内で混在させてはならない（assign_track_ids でモードを排他選択する）。
+
+# 標本点パッチが当該色とみなされる最小被覆率（パッチ面積の 1/4 以上）。
+_PATCH_MIN_FRAC = 0.25
+
+
+def _classify_sample_color(frame: np.ndarray,
+                           cx: float, cy: float, radius: int) -> str | None:
+    """
+    尾上の単一標本点まわりの円形パッチを HSV 判定し、帯カウント対象色 (赤/青) の
+    色名を返す。どの対象色にも十分一致しなければ None（皮膚・地色）。
+
+    Parameters
+    ----------
+    frame  : BGR 画像
+    cx, cy : 標本点のピクセル座標
+    radius : 円形パッチ半径 (TAIL_SAMPLE_RADIUS_PX)
+    """
+    h, w = frame.shape[:2]
+    x, y = int(round(cx)), int(round(cy))
+    x1, y1 = max(0, x - radius), max(0, y - radius)
+    x2, y2 = min(w, x + radius), min(h, y + radius)
+    if (x2 - x1) < 3 or (y2 - y1) < 3:
+        return None
+
+    roi_bgr = frame[y1:y2, x1:x2]
+    roi_hsv = cv2.cvtColor(cv2.GaussianBlur(roi_bgr, (3, 3), 0), cv2.COLOR_BGR2HSV)
+
+    # ROI 内の円形マスク（パッチ実効領域）
+    px, py = x - x1, y - y1
+    mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
+    cv2.circle(mask, (px, py), radius, 255, -1)
+    total = int(np.count_nonzero(mask))
+    if total == 0:
+        return None
+
+    best_name, best_frac = None, 0.0
+    for mouse_id in BAND_COUNT_COLOR_IDS:
+        info = MOUSE_COLORS.get(mouse_id)
+        if not info:
+            continue
+        lower = np.array(info["hsv_lower"], dtype=np.uint8)
+        upper = np.array(info["hsv_upper"], dtype=np.uint8)
+        cm = cv2.inRange(roi_hsv, lower, upper)
+        # 赤は色相環の両端 (0付近 / 180付近) に分布するため両端マスクを結合
+        if mouse_id == 1:
+            cm = cv2.bitwise_or(cm, cv2.inRange(
+                roi_hsv,
+                np.array(RED_WRAP_LOWER, dtype=np.uint8),
+                np.array(RED_WRAP_UPPER, dtype=np.uint8)))
+        frac = float(np.count_nonzero(cv2.bitwise_and(cm, mask))) / float(total)
+        if frac > best_frac:
+            best_frac, best_name = frac, info["name"]
+
+    return best_name if best_frac >= _PATCH_MIN_FRAC else None
+
+
+def _resample_polyline(points: list, step: float) -> list:
+    """
+    順序付き頂点列 points=[(x,y), ...] を弧長 step ごとに等間隔再標本化する。
+    尾チェーンの各ノード間隔は不均一なため、帯長を一定尺度で数えられるよう距離等間隔化する。
+    """
+    pts = [(float(x), float(y)) for (x, y) in points
+           if x is not None and y is not None
+           and not (np.isnan(x) or np.isnan(y))]
+    if len(pts) < 2:
+        return pts[:]
+
+    samples = [pts[0]]
+    carry = 0.0  # 直前セグメントで標本化しきれなかった残り弧長
+    for (x0, y0), (x1, y1) in zip(pts[:-1], pts[1:]):
+        seg = float(np.hypot(x1 - x0, y1 - y0))
+        if seg <= 1e-6:
+            continue
+        d = step - carry
+        while d <= seg:
+            t = d / seg
+            samples.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0)))
+            d += step
+        carry = seg - (d - step)
+    return samples
+
+
+def _count_bands(present: list, min_run: int, max_gap: int) -> int:
+    """
+    二値列 present (要素 1=対象色, 0=非対象色) から帯の本数を数える。
+
+    - 連続する 1 の run 長が min_run 以上のものを 1 帯とみなす。
+    - 帯と帯の間の 0 ギャップが max_gap 以上のときのみ帯の連続を打ち切る。
+      （市松状の途切れや 1px の欠損で帯が過剰分割されるのを防ぐため、
+        短いギャップは同一帯として結合する。）
+    - min_run 未満の微小な 1 run はノイズとして無視する。
+    """
+    if not present:
+        return 0
+
+    # ランレングス符号化 (value, length)
+    runs = []
+    cur_v, cur_len = present[0], 1
+    for v in present[1:]:
+        if v == cur_v:
+            cur_len += 1
+        else:
+            runs.append((cur_v, cur_len))
+            cur_v, cur_len = v, 1
+    runs.append((cur_v, cur_len))
+
+    bands = 0
+    pending_band = False  # 直近で帯を計上済みか（小ギャップ結合の判定用）
+    for v, length in runs:
+        if v == 1 and length >= min_run:
+            if not pending_band:
+                bands += 1
+                pending_band = True
+        elif v == 0 and length >= max_gap:
+            # 大きなギャップで帯の連続を打ち切る → 次の帯は別本として計上される
+            pending_band = False
+        # それ以外 (微小な色 run / 小ギャップ) は状態を維持して無視
+    return bands
+
+
+def classify_tail_by_bands(frame: np.ndarray, tail_points: list) -> int | None:
+    """
+    尾の折れ線 (base→end 順の座標列) に沿って色を標本化し、「色 + 帯本数」から
+    mouse_id (MOUSE_ID_BY_COLOR_COUNT, 1–4) を返す。判定不能なら None。
+
+    手順:
+      1. 折れ線を TAIL_SAMPLE_STEP_PX 間隔で等距離再標本化する。
+      2. 各標本点の円形パッチ (半径 TAIL_SAMPLE_RADIUS_PX) を赤/青/None に分類する。
+      3. 対象色ごとにラベル列をランレングス符号化し、帯の本数を数える
+         (BAND_MIN_LEN_PX で 1 帯の最小長、BAND_MIN_GAP_PX で帯の分離を制御)。
+      4. 標本数が最多の対象色を尾のマーカー色とし、その帯本数 (∈{1,2}) を採用する。
+      5. (色名, 本数) → MOUSE_ID_BY_COLOR_COUNT で個体 ID へ対応付ける。
+    """
+    samples = _resample_polyline(tail_points, TAIL_SAMPLE_STEP_PX)
+    if len(samples) < 2:
+        return None
+
+    labels = [_classify_sample_color(frame, x, y, TAIL_SAMPLE_RADIUS_PX)
+              for (x, y) in samples]
+
+    # px 閾値を「標本数」に換算（標本間隔 = TAIL_SAMPLE_STEP_PX）
+    step = float(TAIL_SAMPLE_STEP_PX)
+    min_run = max(1, int(round(BAND_MIN_LEN_PX / step)))  # 1 帯とみなす最小標本数
+    max_gap = max(1, int(round(BAND_MIN_GAP_PX / step)))  # 帯を分離する最小ギャップ標本数
+
+    best_id, best_score = None, 0
+    for mouse_id in BAND_COUNT_COLOR_IDS:
+        color_name = MOUSE_COLORS[mouse_id]["name"]
+        present = [1 if lab == color_name else 0 for lab in labels]
+        total_hits = sum(present)
+        if total_hits == 0:
+            continue
+        bands = _count_bands(present, min_run, max_gap)
+        if bands <= 0:
+            continue
+        band_count = min(2, bands)  # 3 本以上は 2 とみなす（対応表の都合）
+        mid = MOUSE_ID_BY_COLOR_COUNT.get((color_name, band_count))
+        if mid is None:
+            continue
+        # 支配色の決定: 当該色の総標本数が最多のものを尾のマーカー色として採用
+        if total_hits > best_score:
+            best_score, best_id = total_hits, mid
 
     return best_id
 
@@ -199,6 +380,34 @@ def _fallback_assign_by_body_size(
 
 # ── Batch assignment for a full video ────────────────────────────────────────
 
+def _ordered_tail_keypoints(columns) -> list:
+    """
+    wide フォーマットの列名から尾チェーンのキーポイント基底名を base→end の順に並べて返す。
+    DLC のバージョンやモデルにより尾ノード名は tail_base / tail1..tail5 / tail_end 等と
+    異なるため、末尾の番号で頑健にソートする。
+
+    順序規則:
+      tail_base (始端) → tail1, tail2, … (番号昇順) → tail_end / tail_tip (終端)
+    """
+    names = set()
+    for c in columns:
+        if isinstance(c, str) and c.endswith("_x"):
+            base = c[:-2]
+            if base.lower().startswith("tail"):
+                names.add(base)
+
+    def sort_key(n: str):
+        nl = n.lower()
+        if nl in ("tail_base", "tailbase"):
+            return (0, 0)
+        if nl in ("tail_end", "tailend", "tail_tip", "tailtip"):
+            return (2, 0)
+        m = re.search(r"(\d+)", nl)
+        return (1, int(m.group(1)) if m else 999)
+
+    return sorted(names, key=sort_key)
+
+
 def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
                      mice_count: int = 0,
                      initial_mapping: Optional[Dict[str, int]] = None) -> pd.DataFrame:
@@ -260,6 +469,35 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
                 used_ids.add(next_id)
                 print(f"[color_id] [Info] 未マッピングトラック {track} → mouse_id={next_id} に仮割り当て")
         result["mouse_id"] = result["mouse_id"].astype("Int64")
+        # [A-3] 人が確認・承認したマッピングのため ID 信頼度は最高 (1.0) とする。
+        # 仮割り当て（未マッピングからの連番フォールバック）分は根拠が弱いため 0.0。
+        mapped_tracks = set(initial_mapping.keys())
+        result["id_confidence"] = result["track"].map(
+            lambda t: 1.0 if str(t) in mapped_tracks else 0.0
+        )
+        per_mouse_cm = {}
+        for m_id in sorted(result["mouse_id"].dropna().unique()):
+            m_id_int = int(m_id)
+            # mouse_id=0 は「誤検出（除外）」の特別値。個体QCの対象外とする。
+            if m_id_int <= 0:
+                continue
+            mask = result["mouse_id"] == m_id
+            n_frames = int(mask.sum())
+            n_low = int((mask & (result["id_confidence"] < 0.70)).sum())
+            mean_conf = float(result.loc[mask, "id_confidence"].mean()) if n_frames else 0.0
+            per_mouse_cm[m_id_int] = {
+                "mean_confidence":   round(mean_conf, 4),
+                "n_frames":          n_frames,
+                "n_low_conf_frames": n_low,
+                "n_subtracks":       1,
+            }
+        result.attrs["id_quality"] = {
+            "low_conf_threshold": 0.70,
+            "swap_events":        [],
+            "n_swap_events":      0,
+            "per_mouse":          per_mouse_cm,
+            "source":             "confirmed_mapping",
+        }
         return result
 
     cap = cv2.VideoCapture(video_path)
@@ -277,6 +515,18 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
     if total_video_frames < max_frame:
         print(f"[Warning] 動画フレーム数({total_video_frames}) < データフレーム数({max_frame})")
 
+    # ── 個体識別モードの決定: 尾チェーンの有無で「色+帯本数」/「単点色」を排他選択 ──
+    # 尾チェーン (tail_base + tail1.. + tail_end) が wide df に存在すれば帯本数判定を使い、
+    # MOUSE_ID_BY_COLOR_COUNT による「色+本数」ID 空間 (1–4) で投票する。
+    # 尾チェーンが無い（tail_base 単点のみ）場合は従来の単点 HSV 分類 (色のみ ID) に後方互換する。
+    # ※ 2 つの ID 空間は意味が異なるため、同一動画内で混在させない。
+    tail_kps = _ordered_tail_keypoints(pose_df.columns)
+    use_band_counting = len(tail_kps) >= 2
+    if use_band_counting:
+        print(f"[color_id] [Info] 尾チェーン {tail_kps} を検出。色+帯本数による個体識別を使用します。")
+    else:
+        print("[color_id] [Info] 尾チェーン未検出。単点尾色分類（色のみ・後方互換）を使用します。")
+
     # 各元のトラック（original_track）の状態追跡用辞書
     # track_states[orig_track] = {
     #     "current_subtrack": orig_track,
@@ -291,6 +541,10 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
     
     # 各 subtrack_id ごとにフレームごとの投票結果を蓄積する
     subtrack_votes = defaultdict(list)
+
+    # [A-3] ID品質管理: 検知した Identity Swap（色取り違え）イベントを記録する。
+    # 各要素 = {orig_track, frame_idx, old_subtrack, new_subtrack, color}
+    swap_events = []
 
     # C-1: groupby で事前にフレームごとにグループ化し、フレームの全走査O(N^2)をO(N)に削減
     grouped = pose_df.groupby("frame_idx")
@@ -315,8 +569,24 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
             ty = row.get("tail_base_y", np.nan)
             tc = row.get("tail_base_conf", 1.0)
 
-            # 色の分類（1–4 または None）
-            color_id = classify_tail_color(frame, (tx, ty), tc)
+            # 色の分類（モードにより ID 空間が異なる。混在させない）
+            if use_band_counting:
+                # 尾チェーンの折れ線を base→end の順に組み立て、低信頼ノードは除外する。
+                tail_points = []
+                for kp in tail_kps:
+                    kx = row.get(f"{kp}_x", np.nan)
+                    ky = row.get(f"{kp}_y", np.nan)
+                    kc = row.get(f"{kp}_conf", 1.0)
+                    if (not (np.isnan(kx) or np.isnan(ky))
+                            and (kc is None or np.isnan(kc) or kc >= 0.30)):
+                        tail_points.append((kx, ky))
+                # 「色+帯本数」→ mouse_id (1–4)。判定不能なら None（そのフレームは投票しない）。
+                # ※ 単点色分類への代替は ID 空間が異なるため行わない。
+                color_id = (classify_tail_by_bands(frame, tail_points)
+                            if len(tail_points) >= 2 else None)
+            else:
+                # 従来の単点 HSV 分類（色のみ ID, 1–4）
+                color_id = classify_tail_color(frame, (tx, ty), tc)
 
             # トラック状態の初期化
             if orig_track not in track_states:
@@ -355,6 +625,14 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
                         state["stable_color"] = major_color
                         # 履歴をクリアして新たなサブトラックとして開始
                         state["history"] = [major_color]
+                        # [A-3] スワップイベントを品質レポート用に記録
+                        swap_events.append({
+                            "orig_track":   str(orig_track),
+                            "frame_idx":    int(frame_idx),
+                            "old_subtrack": str(old_subtrack),
+                            "new_subtrack": str(new_subtrack),
+                            "color":        int(major_color) if major_color is not None else None,
+                        })
                         print(f"[color_id] [Swap] トラック混同検知: {orig_track} がフレーム {frame_idx} で色変化 "
                               f"({old_subtrack} -> {new_subtrack}, 色: {major_color})")
 
@@ -369,12 +647,22 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
     cap.release()
 
     # 各サブトラックの最終色（多数決）を決定
+    # [A-3] あわせて ID 信頼度 = 採用色の得票数 / 総得票数 を算出する。
+    #   信頼度 = (採用色票数) / (有効カラー票総数)
+    #   1.0 に近いほどそのサブトラックの色は一貫しており、ID 割り当てが確実。
+    #   0.5 付近は別個体の色票が多く混入しており、混同（Swap）の疑いが強い。
     subtrack_to_color = {}
+    subtrack_confidence = {}
     for subtrack_id, v_list in subtrack_votes.items():
         if v_list:
-            subtrack_to_color[subtrack_id] = Counter(v_list).most_common(1)[0][0]
+            major_color, major_count = Counter(v_list).most_common(1)[0]
+            subtrack_to_color[subtrack_id] = major_color
+            subtrack_confidence[subtrack_id] = float(major_count) / float(len(v_list))
         else:
             subtrack_to_color[subtrack_id] = None
+            # カラー票がまったく無いサブトラック（後段で体長フォールバック対象）は
+            # 色由来の根拠が無いため信頼度 0.0（要確認）とする。
+            subtrack_confidence[subtrack_id] = 0.0
 
     # 最終的な DataFrame の更新
     pose_df = pose_df.copy()
@@ -437,6 +725,48 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
     if mice_count > 0 and detected_count != mice_count:
         print(f"[color_id] [Warning] 検出個体数 ({detected_count}) が期待値 ({mice_count}) と異なります。"
               f"動画の途中で個体数が変化している可能性があります。")
+
+    # ── [A-3] ID信頼度カラムの付与と品質レポートの構築 ───────────────────────
+    # 各フレーム行に、そのサブトラックのID信頼度（採用色得票率）を付与する。
+    # frame_labels CSV に出力され、フロントエンドで低信頼フレームの可視化に使われる。
+    pose_df["id_confidence"] = pose_df["track"].map(
+        lambda t: round(subtrack_confidence.get(t, 0.0), 4)
+    )
+
+    # 個体（mouse_id）ごとに信頼度を集計する。投票数を重みとした加重平均を採用し、
+    # 短いサブトラックのノイズが過度に影響しないようにする。
+    per_mouse = {}
+    for subtrack_id, color in subtrack_to_color.items():
+        if color is None:
+            continue
+        n_votes = len(subtrack_votes.get(subtrack_id, []))
+        conf = subtrack_confidence.get(subtrack_id, 0.0)
+        acc = per_mouse.setdefault(int(color), {"weighted_sum": 0.0, "n_votes": 0, "n_subtracks": 0})
+        acc["weighted_sum"] += conf * n_votes
+        acc["n_votes"] += n_votes
+        acc["n_subtracks"] += 1
+
+    LOW_CONF_THRESHOLD = 0.70  # この値未満のフレームを「低信頼」として警告対象にする
+    mouse_quality = {}
+    for m_id, acc in per_mouse.items():
+        mean_conf = (acc["weighted_sum"] / acc["n_votes"]) if acc["n_votes"] > 0 else 0.0
+        mask = pose_df["mouse_id"] == m_id
+        n_frames = int(mask.sum())
+        n_low = int((mask & (pose_df["id_confidence"] < LOW_CONF_THRESHOLD)).sum())
+        mouse_quality[int(m_id)] = {
+            "mean_confidence":   round(float(mean_conf), 4),
+            "n_frames":          n_frames,
+            "n_low_conf_frames": n_low,
+            "n_subtracks":       acc["n_subtracks"],
+        }
+
+    # 品質レポートを DataFrame の attrs に格納する（戻り値シグネチャを変えずに伝搬）。
+    pose_df.attrs["id_quality"] = {
+        "low_conf_threshold": LOW_CONF_THRESHOLD,
+        "swap_events":        swap_events,
+        "n_swap_events":      len(swap_events),
+        "per_mouse":          mouse_quality,
+    }
 
     return pose_df
 

@@ -248,6 +248,71 @@ def evaluate_bouts(
     return pd.DataFrame(rows)
 
 
+# ── frame ラベル → bout 区間 変換 ────────────────────────────────────────────
+
+def frame_labels_to_bouts(frame_df: pd.DataFrame, fps: float = 30.0) -> pd.DataFrame:
+    """
+    フレーム単位の is_scratch ラベルから bout 区間を生成する。
+
+    bout 形成ルールは feature_extraction.py の Bout 検出ロジックと完全に一致させる:
+      - 連続するひっかきフレーム間のギャップが BOUT_MERGE_GAP 以下なら同一 bout に連結
+      - bout の継続フレーム数が BOUT_MIN_FRAMES 以上のもののみ採用
+    これにより、自動検出 bout（pipeline 出力）と GT bout（本関数で生成）が
+    同一の規則で区間化され、Bout レベルの比較が公平になる。
+
+    入力 frame_df: 列 [frame_idx, mouse_id, is_scratch]
+    返り値:        列 [mouse_id, start_frame, end_frame]
+    """
+    # config から bout 形成パラメータを読み込む（pipeline と同一の値）
+    try:
+        from config import BOUT_MIN_FRAMES, BOUT_MERGE_GAP
+    except Exception:
+        # config が読めない場合は feature_extraction.py のデフォルトにフォールバック
+        BOUT_MIN_FRAMES, BOUT_MERGE_GAP = 10, 10
+
+    rows = []
+    if frame_df.empty:
+        return pd.DataFrame(columns=["mouse_id", "start_frame", "end_frame"])
+
+    for mid in sorted(frame_df["mouse_id"].unique()):
+        grp = frame_df[frame_df["mouse_id"] == mid].sort_values("frame_idx")
+        scratch_frames = grp[grp["is_scratch"] == 1]["frame_idx"].astype(int).tolist()
+        if not scratch_frames:
+            continue
+
+        start_f = scratch_frames[0]
+        last_f  = scratch_frames[0]
+        for f in scratch_frames[1:]:
+            if f - last_f <= BOUT_MERGE_GAP:
+                last_f = f
+            else:
+                if last_f - start_f + 1 >= BOUT_MIN_FRAMES:
+                    rows.append({"mouse_id": int(mid), "start_frame": int(start_f), "end_frame": int(last_f)})
+                start_f = f
+                last_f  = f
+        if last_f - start_f + 1 >= BOUT_MIN_FRAMES:
+            rows.append({"mouse_id": int(mid), "start_frame": int(start_f), "end_frame": int(last_f)})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["mouse_id", "start_frame", "end_frame"])
+
+
+def _normalize_auto_bouts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    pipeline 出力の bouts CSV（列 bout_start_frame/bout_end_frame）を
+    evaluate_bouts が要求する列 [mouse_id, start_frame, end_frame] に正規化する。
+    """
+    df = df.copy()
+    df.columns = df.columns.str.strip().str.lower()
+    if "start_frame" not in df.columns:
+        if "bout_start_frame" in df.columns and "bout_end_frame" in df.columns:
+            df["start_frame"] = df["bout_start_frame"].astype(int)
+            df["end_frame"]   = df["bout_end_frame"].astype(int)
+        elif "bout_start_time_s" in df.columns and "bout_end_time_s" in df.columns:
+            df = df.rename(columns={"bout_start_time_s": "start_time_s",
+                                    "bout_end_time_s":   "end_time_s"})
+    return df
+
+
 # ── Top-level runner ─────────────────────────────────────────────────────────
 
 def run_evaluation(
@@ -281,6 +346,7 @@ def run_evaluation(
         frame_metrics = pd.DataFrame()
 
     # ── Bout レベル評価 ──
+    # Bout 評価が失敗しても frame_metrics は返せるよう、例外で全体を止めない。
     bout_metrics = None
     if gt_format == "bout" or auto_bouts_csv is not None:
         # 自動 bouts CSV の特定
@@ -288,9 +354,19 @@ def run_evaluation(
             # frame_labels.csv → bouts.csv の命名規則から推測
             auto_bouts_csv = auto_frame_csv.replace("_frame_labels.csv", "_bouts.csv")
         if os.path.exists(auto_bouts_csv):
-            auto_bouts_df = pd.read_csv(auto_bouts_csv)
-            gt_bouts_df   = gt_df if gt_format == "bout" else load_ground_truth(gt_csv, fmt="bout")
-            bout_metrics  = evaluate_bouts(auto_bouts_df, gt_bouts_df, fps=fps, iou_threshold=iou_threshold)
+            try:
+                auto_bouts_df = _normalize_auto_bouts(pd.read_csv(auto_bouts_csv))
+                # GT bout の用意:
+                #   gt_format='bout'  → そのまま使用（区間ラベル）
+                #   gt_format='frame' → frame ラベルから pipeline と同一規則で bout 化
+                if gt_format == "bout":
+                    gt_bouts_df = gt_df
+                else:
+                    gt_bouts_df = frame_labels_to_bouts(gt_df, fps=fps)
+                bout_metrics = evaluate_bouts(auto_bouts_df, gt_bouts_df, fps=fps, iou_threshold=iou_threshold)
+            except Exception as e:
+                print(f"[evaluate] [Warning] Bout評価に失敗しました（frame指標は有効）: {e}")
+                bout_metrics = None
         else:
             print(f"[evaluate] [Warning] Bout CSVが見つかりません: {auto_bouts_csv} — Bout評価をスキップします。")
 
