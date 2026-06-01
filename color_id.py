@@ -674,6 +674,10 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
     pose_df["mouse_id"] = pose_df["track"].map(lambda t: subtrack_to_color.get(t, None))
 
     # 3. 同一フレーム内での個体ID重複（衝突）の解消 (C-2: `.loc` O(N^2) 検索を避けるため `.at` に最適化)
+    # 注: 重複解消はフレーム単位で多数発生しうる（数千フレーム×複数IDで数十万件規模）。
+    #     各解消を逐一 print するとログが肥大化するため、件数のみ集計し末尾で1行に集約する。
+    dedup_count = 0           # 解消した（ID を解除した）サブトラックの総件数
+    dedup_frames = set()      # 解消が発生したフレームの集合（影響フレーム数の把握用）
     for frame_idx, frame_grp in pose_df.groupby("frame_idx"):
         active_mice = frame_grp[frame_grp["mouse_id"].notna()]
         if len(active_mice) != len(active_mice["mouse_id"].unique()):
@@ -683,13 +687,18 @@ def assign_track_ids(video_path: str, pose_df: pd.DataFrame,
                     conflicting_rows = active_mice[active_mice["mouse_id"] == m_id]
                     best_subtrack = max(conflicting_rows["track"],
                                         key=lambda s: Counter(subtrack_votes[s]).get(m_id, 0))
-                    
+
                     for idx, crow in conflicting_rows.iterrows():
                         sub_t = crow["track"]
                         if sub_t != best_subtrack:
                             pose_df.at[idx, "mouse_id"] = None
-                            print(f"[color_id] [Warning] フレーム {frame_idx} 内でID重複を解消: "
-                                  f"サブトラック {best_subtrack} に ID {m_id} を割り当て、{sub_t} は解除しました。")
+                            dedup_count += 1
+                            dedup_frames.add(frame_idx)
+
+    if dedup_count > 0:
+        print(f"[color_id] [Info] 同一フレーム内ID重複の解消: 計 {dedup_count} 件"
+              f"（{len(dedup_frames)} フレームで発生）。各フレームで色票数が最多のサブトラックにIDを残し、"
+              f"他のサブトラックのIDを解除しました。")
 
     # ── フォールバック: 体長クラスタリングで未解決トラックにIDを割り当てる ─────
     # カラーが識別できなかったトラック（白色マウスなど）を体長の類似度でクラスタリングする
