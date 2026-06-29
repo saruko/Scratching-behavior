@@ -60,7 +60,7 @@ graph TD
     C --> D["信頼度マスク + 線形補間"]
     D --> E["mm 換算 + 速度平滑化<br>+ 振動カウント"]
     E --> F["scratch_prob 連続スコア<br>+ scratch_flag"]
-    F --> G["Bout 検出<br>(min=5f, merge_gap=10f)"]
+    F --> G["Bout 検出<br>(min=10f, merge_gap=10f)"]
     G --> H["frame_labels.csv<br>bouts.csv<br>summary.csv"]
     H --> I["GUI: 手動補正<br>(ドラッグ・スワップ・オフセット)"]
     I --> J["corrected.csv エクスポート"]
@@ -100,9 +100,9 @@ speed_mm_s        = speed_px_per_frame × pixel_to_mm_ratio × fps
 
 ### 4. 振動カウント（最小振幅フィルタ付き）
 
-`SCRATCH_WINDOW_FRAMES = 15` フレームのローリング窓内で **x 軸・y 軸両方** の方向転換回数を数え、`max(osc_x, osc_y)` を採用。
+`SCRATCH_WINDOW_FRAMES = 30` フレーム（≈ 1 秒 @ 30 fps）のローリング窓内で **x 軸・y 軸両方** の方向転換回数を数え、`max(osc_x, osc_y)` を採用。1 秒窓とすることで 10 Hz 級のスクラッチ振動を確実に捕捉する（Kuraishi et al. 1995 の 10–15 Hz に対応）。
 
-- 振幅 `|d| < SCRATCH_MIN_OSC_AMPLITUDE_PX = 3.0 px` の変位は **姿勢推定ジッタとして無視**。
+- 振幅 `|d| < SCRATCH_MIN_OSC_AMPLITUDE_MM = 0.75 mm` の変位は **姿勢推定ジッタとして無視**。閾値は **mm 単位**で定義され、`PIXEL_TO_MM_RATIO` で実行時に px へ換算されるため、キャリブレーションが変わっても生物学的意味が保たれる（旧 `SCRATCH_MIN_OSC_AMPLITUDE_PX = 3.0 px` 相当）。
 - 振幅閾値未達時は `last_d` を更新しないため、ノイズによる誤カウントを抑制。
 
 ### 5. スクラッチ判定（連続スコア [0, 1]）
@@ -110,8 +110,10 @@ speed_mm_s        = speed_px_per_frame × pixel_to_mm_ratio × fps
 | 条件 | 閾値 | 環境変数 |
 | --- | --- | --- |
 | 平滑化速度 | `> 150 mm/s` | `SCRATCH_MIN_VELOCITY_MM_S` |
-| 後肢→耳距離 | `< 50 mm` | `SCRATCH_MAX_HEAD_DIST_MM` |
-| 振動数 | `≥ 3` | `SCRATCH_MIN_OSCILLATIONS` |
+| 後肢→頭部最近接距離 | `< 50 mm` | `SCRATCH_MAX_HEAD_DIST_MM` |
+| 振動数 | `≥ 10`（/ 30 フレーム窓 ≒ 10 Hz） | `SCRATCH_MIN_OSCILLATIONS` |
+
+距離条件は **後肢から「耳」と「頭中心（head_center）」の両方への距離の最小値** `min(hind_to_ear, hind_to_head_center)` を用いる（顔面掻き行動を漏れなく検出するため）。
 
 3 条件すべてを満たした場合、各条件の **超過マージン比** の算術平均で連続スコア `scratch_prob ∈ [0, 1]` を算出：
 
@@ -127,7 +129,7 @@ scratch_flag = 1 if scratch_prob > 0 else 0
 
 ### 6. Bout 検出
 
-- `BOUT_MIN_FRAMES = 5` 未満の検出区間は破棄。
+- `BOUT_MIN_FRAMES = 10` フレーム（≈ 0.33 秒 @ 30 fps）未満の検出区間は破棄（Akiyama et al. 2010 の典型 bout 下限に対応）。
 - `BOUT_MERGE_GAP = 10` フレーム以内の隣接区間は結合。
 - 時刻は **動画から取得した実測 FPS** で計算（環境変数 `DEFAULT_FPS = 30` にフォールバック）。
 
@@ -148,11 +150,13 @@ GUI の `recalculateFrameKinematics()` （手動補正後の即時再計算）�
 
 ```
 SCRATCH_MIN_VELOCITY_MM_S, SCRATCH_MAX_HEAD_DIST_MM,
-SCRATCH_MIN_OSCILLATIONS, SCRATCH_MIN_OSC_AMPLITUDE_PX,
+SCRATCH_MIN_OSCILLATIONS, SCRATCH_MIN_OSC_AMPLITUDE_MM,
 SCRATCH_VELOCITY_SMOOTH_FRAMES, SCRATCH_WINDOW_FRAMES,
 BOUT_MIN_FRAMES, BOUT_MERGE_GAP, INTERPOLATION_MAX_GAP,
 PIXEL_TO_MM_RATIO, DEFAULT_FPS
 ```
+
+> 振幅閾値は mm 単位の `SCRATCH_MIN_OSC_AMPLITUDE_MM` を正とする。`/api/config` は旧クライアント向けに `SCRATCH_MIN_OSC_AMPLITUDE_PX` も後方互換として併送する。
 
 ---
 
@@ -494,7 +498,7 @@ python evaluate.py \
 
 ### 📐 推奨報告事項（論文 Methods 節）
 
-> Pose estimation was performed using SLEAP (Pereira et al., 2022) [or YOLOv8-pose; cite Jocher et al.] with a custom model trained on N annotated frames of laboratory mice in top-down view. Individual identity was assigned via colored tail-paint (red, blue, yellow, black) tracked by HSV-based sliding-window voting over 30 frames, with automatic track splitting upon identity-swap detection. Scratching bouts were detected by a three-condition rule: smoothed hind-paw speed > 150 mm/s (averaged over 5 frames), hind-paw-to-ear distance < 50 mm, and ≥ 3 directional reversals (minimum oscillation amplitude 3 px) within a 15-frame window. Pixel-to-mm calibration was performed per camera at 0.XXX mm/px (measured against a reference ruler at the cage floor). Bouts shorter than 5 frames were discarded; adjacent bouts within 10 frames were merged. Inter-rater reliability against manual annotation was Cohen's κ = X.XX (frame-level), with Sensitivity X.XX / FDR X.XX at temporal IoU ≥ 0.5 (bout-level).
+> Pose estimation was performed using SLEAP (Pereira et al., 2022) [or YOLOv8-pose; cite Jocher et al.] with a custom model trained on N annotated frames of laboratory mice in top-down view. Individual identity was assigned via colored tail-paint (red, blue, yellow, black) tracked by HSV-based sliding-window voting over 30 frames, with automatic track splitting upon identity-swap detection. Scratching bouts were detected by a three-condition rule: smoothed hind-paw speed > 150 mm/s (averaged over 5 frames), hind-paw-to-target distance < 50 mm (minimum of the distances to the ear and the head center), and ≥ 10 directional reversals (minimum oscillation amplitude 0.75 mm) within a 30-frame (≈ 1 s) window. Pixel-to-mm calibration was performed per camera at 0.XXX mm/px (measured against a reference ruler at the cage floor). Bouts shorter than 10 frames were discarded; adjacent bouts within 10 frames were merged. Inter-rater reliability against manual annotation was Cohen's κ = X.XX (frame-level), with Sensitivity X.XX / FDR X.XX at temporal IoU ≥ 0.5 (bout-level).
 
 ---
 
