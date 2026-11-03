@@ -29,7 +29,7 @@ BASE_PACKAGES = [
     ("uvicorn",   "uvicorn[standard]>=0.29.0"),
     ("pydantic",  "pydantic>=2.7.0"),
     ("cv2",       "opencv-python-headless>=4.9.0"),
-    ("numpy",     "numpy>=1.23.0,<2.0"),   # DeepLabCut が numpy<2 を要求するため上限を固定
+    ("numpy",     "numpy>=1.23.0"),   # DeepLabCut 3 の PyTorch 版は numpy 2 で動く（numpy<2 は TensorFlow 版だけの要件）
     ("pandas",    "pandas>=2.0.0"),
     ("h5py",      "h5py>=3.9.0"),
     ("ultralytics", "ultralytics>=8.2.0"),
@@ -38,6 +38,11 @@ BASE_PACKAGES = [
 
 # GPU 用 PyTorch ホイールの CUDA タグ。RTX 5080(sm_120) 対応のため cu128 を使用。
 TORCH_CUDA_TAG = "cu128"
+# 既知の脆弱性（GHSA-rrmf-rvhw-rf47 等）が直った PyTorch の最低版。これより古ければ入れ直す。
+MIN_TORCH = (2, 13)
+# 対応する Python の最低版（ユーザー判断で 3.14 に揃える）。Pillow の脆弱性の修正版（13.0.0）は
+# Python 3.11 以上でしか入らず、PyTorch 2.15 以降は Python 3.10 に対応しない。
+MIN_PYTHON = (3, 14)
 
 
 def _has_module(import_name: str) -> bool:
@@ -81,6 +86,12 @@ def torch_status(gpu: bool):
     """
     if not _has_module("torch"):
         return "missing"
+    from importlib.metadata import version
+    torch_version = version("torch")  # 例: "2.11.0+cu128"
+    if tuple(int(x) for x in torch_version.split(".")[:2]) < MIN_TORCH:
+        print(f"[check_env] [Warning] PyTorch {torch_version} には既知の脆弱性があります。"
+              f"{MIN_TORCH[0]}.{MIN_TORCH[1]} 以上へ入れ直します。")
+        return "reinstall"
     if not gpu:
         return None  # CPU 環境では import できれば良い
 
@@ -111,7 +122,7 @@ def install_torch(gpu: bool, force: bool) -> None:
     else:
         index = "https://download.pytorch.org/whl/cpu"
         print("[check_env] GPU 未検出: PyTorch を CPU 版で導入します。")
-    args = ["torch", "torchvision", "--index-url", index]
+    args = [f"torch>={MIN_TORCH[0]}.{MIN_TORCH[1]}", "torchvision", "--index-url", index]
     if force:
         # cu121 等の非対応ビルドを cu128 に置き換える場合は強制再インストール
         args.append("--force-reinstall")
@@ -175,6 +186,14 @@ def main() -> int:
     gpu = detect_gpu()
     print(f"[check_env] Python: {sys.version.split()[0]} ({sys.executable})")
     print(f"[check_env] GPU 検出: {gpu}")
+
+    if sys.version_info[:2] < MIN_PYTHON:
+        # 古い Python で作った環境はそのまま使わず、作り直してもらう（自動では消さない）
+        print(f"[check_env] [Error] Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} 以上が必要です。"
+              f"この環境は Python {sys.version.split()[0]} です。")
+        print("[check_env]         .venv を削除（または名前を変更）するか、conda なら "
+              "`conda env remove -n mouse-scratch` を実行してから、start.bat をもう一度実行してください。")
+        return 1
 
     if args.no_install:
         # 報告のみモード: 何が足りないかを表示して終了

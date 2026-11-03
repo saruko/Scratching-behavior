@@ -25,11 +25,11 @@ if not errorlevel 1 (
 
 if defined USE_CONDA (
     echo [Info] conda を検出しました。conda 環境 'mouse-scratch' を使用します。
-    :: 環境が無ければ作成（python 3.10。PyTorch cu128 等は check_env.py が pip で導入）
+    :: 環境が無ければ作成（python 3.14。PyTorch cu128 等は check_env.py が pip で導入）
     conda env list | findstr /C:"mouse-scratch" > nul 2>&1
     if errorlevel 1 (
         echo [Step 1/3] conda 環境 'mouse-scratch' を作成しています...
-        call conda create -n mouse-scratch python=3.10 -y
+        call conda create -n mouse-scratch python=3.14 -y
         if errorlevel 1 (
             echo [Error] conda 環境の作成に失敗しました。
             pause
@@ -44,12 +44,12 @@ if defined USE_CONDA (
     echo [Info] conda が見つかりません。プロジェクト直下の .venv を使用します。
     if not exist ".venv\Scripts\python.exe" (
         echo [Step 1/3] .venv を作成しています...
-        python -m venv .venv
+        py -V:3.14 -m venv .venv
         if errorlevel 1 (
-            echo [Warning] 'python' での venv 作成に失敗。py ランチャーで再試行します...
-            py -3 -m venv .venv
+            echo [Warning] py ランチャーで Python 3.14 が見つかりません。'python' で再試行します...
+            python -m venv .venv
             if errorlevel 1 (
-                echo [Error] .venv の作成に失敗しました。Python 3.10+ をインストールしてください。
+                echo [Error] .venv の作成に失敗しました。Python 3.14 をインストールしてください。
                 pause
                 exit /b 1
             )
