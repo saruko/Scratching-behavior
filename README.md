@@ -218,12 +218,13 @@ cd mouse-scratch-dashboard
 # 2-a. Conda（GPU 環境）
 conda env create -f environment.yml
 conda activate mouse-scratch
+python check_env.py   # PyTorch（GPU は cu128）と DeepLabCut を入れる
 
 # 2-b. pip（CPU / Colab）
 pip install -r requirements.txt
 # PyTorch は別途インストール（CUDA バージョンに応じて）:
-#   GPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-#   CPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   GPU:  pip install "torch>=2.13" torchvision --index-url https://download.pytorch.org/whl/cu128
+#   CPU:  pip install "torch>=2.13" torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # 2-c. (オプション) DeepLabCut SuperAnimal を使う場合
 #   → 追加学習不要でマウス専用モデルを zero-shot 利用可能
@@ -267,7 +268,9 @@ python pipeline.py --video "C:\path\to\videos\cage_01.mov" ^
 ```
 
 > **環境に関する注意（重要）**
-> - 本マシンで GPU 推論が実際に動作するのは **プロジェクト直下の `.venv`**（Python 3.10 / `torch 2.11.0+cu128`）です。RTX 5080（Blackwell / sm_120）は CUDA 12.8 以降のビルドが必要なため、`environment.yml` の `pytorch-cuda=12.1` で作る conda 環境 `mouse-scratch` では GPU カーネルが無く動作しません。
+> - 本マシンで GPU 推論が実際に動作するのは **プロジェクト直下の `.venv`**（PyTorch cu128）です。RTX 5080（Blackwell / sm_120）は CUDA 12.8 以降のビルドが必要です。`environment.yml` には PyTorch を入れず、`check_env.py` が cu128 版を入れます。
+> - **Python 3.14 が必要です**（脆弱性を直した Pillow 13 は Python 3.11 以上、PyTorch 2.15 以降は Python 3.10 に非対応）。Python 3.10 で作った既存の `.venv` や conda 環境 `mouse-scratch` では `check_env.py` がエラーで止まるので、`.venv` を削除（または名前を変更）するか `conda env remove -n mouse-scratch` を実行してから `start.bat` を実行し直してください。PyTorch も 2.13 より古ければ `check_env.py` が入れ直します（既知の脆弱性のため）。
+> - 既知の未修正の脆弱性: DeepLabCut 3.0.2（最新）が `filelock<3.16` を要求するため、filelock は修正版（4.2.1）に上げられません。脆弱性はロックファイルの扱い（シンボリックリンク等）に関するもので、自分の PC で自分だけが使う場合の影響は小さいです。DeepLabCut が制約を緩めたら更新してください。
 > - GPU を使う場合は上記 **2-a の `.venv`** を有効化してください。`start.bat` は conda 環境を前提にしているため、GPU 解析を行う本環境では本節の手動起動を推奨します。
 
 ### B. Google Colab

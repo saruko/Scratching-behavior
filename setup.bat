@@ -29,12 +29,6 @@ if errorlevel 1 (
     set CUDA_VER=cpu
 ) else (
     echo [OK] Nvidia GPU が検出されました。
-    echo.
-    echo ※ CUDA バージョンを確認してください (nvidia-smi の右上 "CUDA Version"):
-    echo    - CUDA 12.x の場合: environment.yml の pytorch-cuda=12.1 のままで OK
-    echo    - CUDA 11.x の場合: environment.yml の pytorch-cuda=12.1 を 11.8 に変更してください
-    echo.
-    pause
 )
 
 :: ── conda 環境の作成 ─────────────────────────────────────
@@ -51,14 +45,20 @@ if errorlevel 1 (
     if errorlevel 1 (
         echo.
         echo [Error] 環境の作成/更新に失敗しました。
-        echo         CUDA バージョンが合っているか environment.yml を確認してください。
         pause
         exit /b 1
     )
 )
 
 echo.
-echo [Step 2/4] GPU / PyTorch 動作確認中...
+echo [Step 2/4] PyTorch / DeepLabCut を導入し、GPU を確認しています...
+call conda run -n mouse-scratch --no-capture-output python check_env.py
+if errorlevel 1 (
+    echo.
+    echo [Error] 依存環境の準備に失敗しました。上記ログを確認してください。
+    pause
+    exit /b 1
+)
 call conda run -n mouse-scratch python -c ^
     "import torch; ^
      gpu = torch.cuda.is_available(); ^
